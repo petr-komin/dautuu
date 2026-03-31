@@ -1,0 +1,23 @@
+{
+  "name": "dautuu",
+  "short_name": "dautuu",
+  "description": "Personal AI assistant with long-term memory",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#1a1410",
+  "theme_color": "#c9923a",
+  "icons": [
+    {
+      "src": "/dautuu-ico.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/dautuu-ico512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
