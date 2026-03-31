@@ -1,0 +1,46 @@
+# docker-compose.yml
+# Varianta: FastAPI + PostgreSQL oba v kontejnerech
+#
+# Použití:
+#   cp .env.example .env        # a vyplň hodnoty
+#   docker compose up -d
+
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dautuu}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-dautuu}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dautuu} -d ${POSTGRES_DB:-dautuu}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # Nezveřejňovat port na hostu v produkci — přístup jen přes interní síť
+    # Odkomentuj pro lokální přístup nástrojem (DBeaver, psql):
+    # ports:
+    #   - "5432:5432"
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-dautuu}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-dautuu}
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      # Pro lokální vývoj — live reload bez rebuildu
+      - ./backend:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  postgres_data:

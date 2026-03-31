@@ -1,0 +1,29 @@
+# docker-compose.host-db.yml
+# Varianta: FastAPI v kontejneru, PostgreSQL běží na hostu
+#
+# Předpoklady na hostu:
+#   - PostgreSQL nainstalováno a běží
+#   - Nainstalované pgvector rozšíření: CREATE EXTENSION vector;
+#   - Databáze a uživatel existují (viz .env)
+#   - pg_hba.conf umožňuje přístup z Dockeru (typicky 172.17.0.0/16)
+#
+# Použití:
+#   cp .env.example .env        # nastav DATABASE_URL na host DB
+#   docker compose -f docker-compose.host-db.yml up -d
+
+services:
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+    env_file:
+      - .env
+    # host.docker.internal funguje na Docker Desktop (Mac/Windows)
+    # Na Linux přidej: extra_hosts: ["host.docker.internal:host-gateway"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # Pro lokální vývoj — live reload bez rebuildu
+      - ./backend:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload

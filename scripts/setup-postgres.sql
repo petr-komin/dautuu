@@ -1,0 +1,3 @@
+CREATE USER dautuu WITH PASSWORD 'xxx';
+CREATE DATABASE dautuu OWNER dautuu;
+CREATE EXTENSION vector;
