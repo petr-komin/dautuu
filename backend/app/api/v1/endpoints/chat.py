@@ -11,7 +11,7 @@ from typing import Literal
 
 from app.api.deps import get_current_user
 from app.db.session import get_db, AsyncSessionLocal
-from app.db.models import User, Conversation, Message
+from app.db.models import User, Conversation, Message, Project
 from app.services.llm.router import (
     chat, chat_with_tools, stream_with_usage,
     ChatMessage, Provider, ToolCall,
@@ -83,11 +83,13 @@ MAX_TOOL_ROUNDS = 6
 
 class ConversationCreate(BaseModel):
     title: str = "Nová konverzace"
+    project_id: uuid.UUID | None = None
 
 
 class ConversationOut(BaseModel):
     id: uuid.UUID
     title: str
+    project_id: uuid.UUID | None = None
 
     model_config = {"from_attributes": True}
 
@@ -99,6 +101,7 @@ class ChatRequest(BaseModel):
     provider: Provider = DEFAULT_PROVIDER
     stream: bool = True
     web_search: bool = True
+    project_id: uuid.UUID | None = None  # pro nové konverzace bez conversation_id
 
 
 class MessageOut(BaseModel):
@@ -231,7 +234,7 @@ async def create_conversation(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    conv = Conversation(user_id=current_user.id, title=body.title)
+    conv = Conversation(user_id=current_user.id, title=body.title, project_id=body.project_id)
     db.add(conv)
     await db.commit()
     await db.refresh(conv)
@@ -240,15 +243,33 @@ async def create_conversation(
 
 @router.get("/conversations", response_model=list[ConversationOut])
 async def list_conversations(
+    project_id: uuid.UUID | None = None,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
-        select(Conversation)
-        .where(Conversation.user_id == current_user.id)
-        .order_by(Conversation.updated_at.desc())
-    )
+    q = select(Conversation).where(Conversation.user_id == current_user.id)
+    if project_id is not None:
+        q = q.where(Conversation.project_id == project_id)
+    result = await db.execute(q.order_by(Conversation.updated_at.desc()))
     return result.scalars().all()
+
+
+@router.patch("/conversations/{conversation_id}", response_model=ConversationOut)
+async def assign_conversation(
+    conversation_id: uuid.UUID,
+    body: dict,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Přeřadí konverzaci do jiného projektu (nebo do globálních — project_id: null)."""
+    conv = await _get_conversation(conversation_id, current_user.id, db)
+    # Explicitně předáváme null → odebrat z projektu; uuid → přiřadit
+    project_id = body.get("project_id", "MISSING")
+    if project_id != "MISSING":
+        conv.project_id = uuid.UUID(project_id) if project_id else None
+    await db.commit()
+    await db.refresh(conv)
+    return conv
 
 
 @router.get("/conversations/{conversation_id}/messages", response_model=list[MessageOut])
@@ -280,7 +301,11 @@ async def send_message(
     if body.conversation_id:
         conv = await _get_conversation(body.conversation_id, current_user.id, db)
     else:
-        conv = Conversation(user_id=current_user.id, title=body.message[:60])
+        conv = Conversation(
+            user_id=current_user.id,
+            title=body.message[:60],
+            project_id=body.project_id,
+        )
         db.add(conv)
         await db.commit()
         await db.refresh(conv)
@@ -318,8 +343,15 @@ async def send_message(
     )
     history = history_result.scalars().all()
 
-    # System prompt + volitelná paměť z minulých konverzací
+    # System prompt + instrukce projektu + volitelná paměť z minulých konverzací
     system_content = SYSTEM_PROMPT
+    if conv.project_id:
+        proj_result = await db.execute(
+            select(Project).where(Project.id == conv.project_id, Project.user_id == current_user.id)
+        )
+        project = proj_result.scalar_one_or_none()
+        if project and project.instructions:
+            system_content = project.instructions + "\n\n---\n\n" + system_content
     if memory:
         system_content += (
             "\n\n---\nNíže jsou relevantní informace z předchozích konverzací s uživatelem. "

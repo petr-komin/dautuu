@@ -85,9 +85,10 @@ async def get_providers(_: User = Depends(get_current_user)):
 
     if settings.anthropic_api_key:
         providers.append(ProviderInfo(id="anthropic", available=True, models=[
-            ModelPreset(provider="anthropic", model="claude-opus-4-5",   label="Claude Opus"),
-            ModelPreset(provider="anthropic", model="claude-sonnet-4-5", label="Claude Sonnet"),
-            ModelPreset(provider="anthropic", model="claude-haiku-3-5",  label="Claude Haiku"),
+            ModelPreset(provider="anthropic", model="claude-opus-4-5",    label="Claude Opus 4.5"),
+            ModelPreset(provider="anthropic", model="claude-sonnet-4-6",  label="Claude Sonnet 4.6"),
+            ModelPreset(provider="anthropic", model="claude-sonnet-4-5",  label="Claude Sonnet 4.5"),
+            ModelPreset(provider="anthropic", model="claude-haiku-3-5",   label="Claude Haiku 3.5"),
         ]))
 
     ollama_models = await get_ollama_models()

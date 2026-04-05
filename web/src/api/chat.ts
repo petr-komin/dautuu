@@ -3,6 +3,7 @@ import { api } from './client'
 export interface ConversationOut {
   id: string
   title: string
+  project_id: string | null
 }
 
 export interface MessageOut {
@@ -12,8 +13,24 @@ export interface MessageOut {
   model: string | null
 }
 
-export async function listConversations(): Promise<ConversationOut[]> {
-  const res = await api.get<ConversationOut[]>('/chat/conversations')
+export async function listConversations(projectId?: string | null): Promise<ConversationOut[]> {
+  const params = projectId !== undefined ? { project_id: projectId ?? undefined } : {}
+  const res = await api.get<ConversationOut[]>('/chat/conversations', { params })
+  return res.data
+}
+
+export async function createConversation(title: string, projectId?: string | null): Promise<ConversationOut> {
+  const res = await api.post<ConversationOut>('/chat/conversations', {
+    title,
+    project_id: projectId ?? null,
+  })
+  return res.data
+}
+
+export async function assignConversation(conversationId: string, projectId: string | null): Promise<ConversationOut> {
+  const res = await api.patch<ConversationOut>(`/chat/conversations/${conversationId}`, {
+    project_id: projectId,
+  })
   return res.data
 }
 
@@ -32,6 +49,7 @@ export async function sendMessageStream(params: {
   provider: string
   model: string
   webSearch: boolean
+  projectId?: string | null
   onChunk: (chunk: string) => void
   onToolEvent: (event: ToolEvent) => void
   onDone: (conversationId: string) => void
@@ -51,6 +69,7 @@ export async function sendMessageStream(params: {
       model: params.model,
       stream: true,
       web_search: params.webSearch,
+      project_id: params.projectId ?? null,
     }),
   })
 
@@ -97,3 +116,4 @@ export async function sendMessageStream(params: {
 
   params.onDone(convId)
 }
+

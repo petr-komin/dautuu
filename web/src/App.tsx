@@ -10,6 +10,7 @@ import { ModelPage } from './pages/ModelPage'
 import { McpPage } from './pages/McpPage'
 import { McpClientsPage } from './pages/McpClientsPage'
 import { ConnectionPage } from './pages/ConnectionPage'
+import { ProjectsPage } from './pages/ProjectsPage'
 
 export default function App() {
   return (
@@ -33,6 +34,7 @@ export default function App() {
           <Route path="/settings" element={<SettingsLayout />}>
             <Route index element={<Navigate to="model" replace />} />
             <Route path="model" element={<ModelPage />} />
+            <Route path="projects" element={<ProjectsPage />} />
             <Route path="mcp" element={<McpPage />} />
             <Route path="mcp-clients" element={<McpClientsPage />} />
             <Route path="connection" element={<ConnectionPage />} />

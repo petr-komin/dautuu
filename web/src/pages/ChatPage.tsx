@@ -1,21 +1,25 @@
 import { useState, useEffect, useRef } from 'react'
-import { Plus, MessageSquare, Loader2, ChevronDown, Globe, FileText, FolderOpen, FilePlus, Trash2 } from 'lucide-react'
+import { useSearchParams, useNavigate, useOutletContext } from 'react-router-dom'
+import { MessageSquare, Loader2, ChevronDown, Globe, FileText, FolderOpen, FilePlus, Trash2, X } from 'lucide-react'
 import toast from 'react-hot-toast'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
 import { fetchPreference, fetchProviders, savePreference, type ProviderInfo } from '../api/auth'
 import {
-  listConversations,
   getMessages,
   sendMessageStream,
-  type ConversationOut,
   type MessageOut,
   type ToolEvent,
 } from '../api/chat'
+import { listProjects } from '../api/projects'
 import { ChatInput } from '../components/chat/ChatInput'
 
 const WEB_SEARCH_STORAGE_KEY = 'dautuu:webSearch'
+
+interface OutletCtx {
+  onConversationCreated: () => void
+}
 
 function toolEventLabel(event: ToolEvent): string {
   if (event.type === 'search') return `Hledám: ${event.query}`
@@ -52,14 +56,20 @@ interface UiMessage {
 }
 
 export function ChatPage() {
-  const [conversations, setConversations] = useState<ConversationOut[]>([])
-  const [activeConvId, setActiveConvId] = useState<string | null>(null)
+  const [searchParams] = useSearchParams()
+  const navigate = useNavigate()
+  const { onConversationCreated } = useOutletContext<OutletCtx>()
+
+  const activeConvId = searchParams.get('conv')
+  const projectId = searchParams.get('project')
+
   const [messages, setMessages] = useState<UiMessage[]>([])
   const [sending, setSending] = useState(false)
   const [provider, setProvider] = useState('together')
   const [model, setModel] = useState('meta-llama/Llama-3.3-70B-Instruct-Turbo')
   const [providers, setProviders] = useState<ProviderInfo[]>([])
   const [modelPickerOpen, setModelPickerOpen] = useState(false)
+  const [projectName, setProjectName] = useState<string | null>(null)
   const [webSearch, setWebSearch] = useState<boolean>(() => {
     const stored = localStorage.getItem(WEB_SEARCH_STORAGE_KEY)
     return stored === null ? true : stored === 'true'
@@ -68,8 +78,8 @@ export function ChatPage() {
   const bottomRef = useRef<HTMLDivElement>(null)
   const pickerRef = useRef<HTMLDivElement>(null)
 
+  // Načti model preference
   useEffect(() => {
-    listConversations().then(setConversations).catch(() => {})
     Promise.all([fetchPreference(), fetchProviders()])
       .then(([pref, providerList]) => {
         setProvider(pref.provider)
@@ -78,6 +88,38 @@ export function ChatPage() {
       })
       .catch(() => {})
   }, [])
+
+  // Načti název projektu pro indikátor
+  useEffect(() => {
+    if (!projectId || activeConvId) {
+      setProjectName(null)
+      return
+    }
+    listProjects().then((projs) => {
+      const proj = projs.find((p) => p.id === projectId)
+      setProjectName(proj?.name ?? null)
+    }).catch(() => {})
+  }, [projectId, activeConvId])
+
+  // Načti zprávy při změně konverzace
+  useEffect(() => {
+    if (!activeConvId) {
+      setMessages([])
+      return
+    }
+    getMessages(activeConvId)
+      .then((msgs) =>
+        setMessages(
+          msgs.map((m: MessageOut) => ({
+            id: m.id,
+            role: m.role as 'user' | 'assistant',
+            content: m.content,
+            model: m.model,
+          }))
+        )
+      )
+      .catch(() => toast.error('Nepodařilo se načíst zprávy'))
+  }, [activeConvId])
 
   useEffect(() => {
     localStorage.setItem(WEB_SEARCH_STORAGE_KEY, String(webSearch))
@@ -97,26 +139,6 @@ export function ChatPage() {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
-  async function openConversation(convId: string) {
-    setActiveConvId(convId)
-    try {
-      const msgs = await getMessages(convId)
-      setMessages(msgs.map((m: MessageOut) => ({
-        id: m.id,
-        role: m.role as 'user' | 'assistant',
-        content: m.content,
-        model: m.model,
-      })))
-    } catch {
-      toast.error('Nepodařilo se načíst zprávy')
-    }
-  }
-
-  function newConversation() {
-    setActiveConvId(null)
-    setMessages([])
-  }
-
   async function handleSend(text: string) {
     setSending(true)
 
@@ -135,6 +157,7 @@ export function ChatPage() {
         provider,
         model,
         webSearch,
+        projectId: projectId,
         onToolEvent: (event) => {
           setMessages((prev) =>
             prev.map((m) =>
@@ -177,9 +200,10 @@ export function ChatPage() {
               prev.map((m) => (m.id === tempBotId ? { ...m, streaming: false, activeToolEvent: null } : m))
             )
           }
+          // Pokud to byla nová konverzace → naviguj na ni a refreshni sidebar
           if (!activeConvId && convId) {
-            setActiveConvId(convId)
-            listConversations().then(setConversations).catch(() => {})
+            navigate(`/chat?conv=${convId}`, { replace: true })
+            onConversationCreated()
           }
           setSending(false)
         },
@@ -204,138 +228,129 @@ export function ChatPage() {
   }
 
   return (
-    <div className="flex h-full overflow-hidden">
-      {/* Sidebar */}
-      <aside className="w-56 shrink-0 flex flex-col border-r border-[var(--border)] bg-[var(--surface)]">
-        <div className="p-3 border-b border-[var(--border)]">
-          <button
-            onClick={newConversation}
-            className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--surface-2)] transition-colors"
+    <div className="flex flex-col h-full">
+      {/* Zprávy */}
+      <div className="flex-1 overflow-y-auto px-4 py-6 flex flex-col gap-4">
+        {messages.length === 0 && (
+          <div className="flex-1 flex flex-col items-center justify-center text-[var(--text-muted)] gap-3 select-none">
+            <MessageSquare size={36} strokeWidth={1.5} />
+            <p className="text-sm">Začni psát zprávu níže</p>
+          </div>
+        )}
+        {messages.map((msg) => (
+          <div
+            key={msg.id}
+            className={['flex flex-col', msg.role === 'user' ? 'items-end' : 'items-start'].join(' ')}
           >
-            <Plus size={15} />
-            Nová konverzace
-          </button>
-        </div>
-        <nav className="flex-1 overflow-y-auto p-2 flex flex-col gap-0.5">
-          {conversations.length === 0 && (
-            <p className="text-xs text-[var(--text-muted)] px-3 py-2">Žádné konverzace</p>
-          )}
-          {conversations.map((conv) => (
-            <button
-              key={conv.id}
-              onClick={() => openConversation(conv.id)}
+            {msg.role === 'assistant' && msg.activeToolEvent && (
+              <div className="flex items-center gap-1.5 text-xs text-[var(--text-muted)] mb-1.5 px-1 animate-pulse">
+                {toolEventIcon(msg.activeToolEvent)}
+                <span>{toolEventLabel(msg.activeToolEvent)}</span>
+              </div>
+            )}
+            <div
               className={[
-                'w-full text-left px-3 py-2 rounded-lg text-sm truncate transition-colors',
-                conv.id === activeConvId
-                  ? 'bg-[var(--accent)]/15 text-[var(--text)]'
-                  : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--surface-2)]',
+                'max-w-[75%] rounded-2xl px-4 py-2.5 text-sm break-words',
+                msg.role === 'user'
+                  ? 'bg-[var(--user-bubble)] text-[var(--user-bubble-text)] rounded-br-sm whitespace-pre-wrap'
+                  : 'bg-[var(--surface-2)] text-[var(--text)] rounded-bl-sm prose-chat',
               ].join(' ')}
             >
-              {conv.title}
-            </button>
-          ))}
-        </nav>
-      </aside>
-
-      {/* Hlavní chat oblast */}
-      <div className="flex-1 flex flex-col min-w-0">
-        <div className="flex-1 overflow-y-auto px-4 py-6 flex flex-col gap-4">
-          {messages.length === 0 && (
-            <div className="flex-1 flex flex-col items-center justify-center text-[var(--text-muted)] gap-3 select-none">
-              <MessageSquare size={36} strokeWidth={1.5} />
-              <p className="text-sm">Začni psát zprávu níže</p>
-            </div>
-          )}
-          {messages.map((msg) => (
-            <div
-              key={msg.id}
-              className={['flex flex-col', msg.role === 'user' ? 'items-end' : 'items-start'].join(' ')}
-            >
-              {msg.role === 'assistant' && msg.activeToolEvent && (
-                <div className="flex items-center gap-1.5 text-xs text-[var(--text-muted)] mb-1.5 px-1 animate-pulse">
-                  {toolEventIcon(msg.activeToolEvent)}
-                  <span>{toolEventLabel(msg.activeToolEvent)}</span>
-                </div>
+              {msg.role === 'user' ? (
+                msg.content
+              ) : (
+                <>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {msg.content || '\u200b'}
+                  </ReactMarkdown>
+                  {msg.streaming && !msg.content && !msg.activeToolEvent && (
+                    <Loader2 size={14} className="animate-spin inline-block" />
+                  )}
+                  {msg.streaming && msg.content && (
+                    <span className="inline-block w-1.5 h-3.5 bg-current ml-0.5 align-middle animate-pulse rounded-sm" />
+                  )}
+                </>
               )}
-              <div
-                className={[
-                  'max-w-[75%] rounded-2xl px-4 py-2.5 text-sm break-words',
-                  msg.role === 'user'
-                    ? 'bg-[var(--user-bubble)] text-[var(--user-bubble-text)] rounded-br-sm whitespace-pre-wrap'
-                    : 'bg-[var(--surface-2)] text-[var(--text)] rounded-bl-sm prose-chat',
-                ].join(' ')}
+            </div>
+            {msg.role === 'assistant' && msg.model && (
+              <span className="text-[10px] text-[var(--text-muted)] mt-0.5 px-1">
+                {providers.flatMap(p => p.models).find(m => m.model === msg.model)?.label ?? msg.model.split('/').pop()}
+              </span>
+            )}
+          </div>
+        ))}
+        <div ref={bottomRef} />
+      </div>
+
+      <ChatInput
+        onSend={handleSend}
+        disabled={sending}
+        webSearch={webSearch}
+        onWebSearchToggle={() => setWebSearch((v) => !v)}
+      />
+
+      {/* Indikátor kontextu nové konverzace */}
+      {!activeConvId && (
+        <div className="flex items-center justify-center gap-2 py-1.5 border-t border-[var(--border)] bg-[var(--surface)]">
+          {projectId && projectName ? (
+            <div className="flex items-center gap-1.5 text-xs text-[var(--accent)] bg-[var(--accent)]/10 border border-[var(--accent)]/25 rounded-full px-3 py-0.5">
+              <FolderOpen size={11} />
+              <span>Nová konverzace v projektu <strong>{projectName}</strong></span>
+              <button
+                onClick={() => navigate('/chat')}
+                className="ml-1 text-[var(--accent)]/60 hover:text-[var(--accent)] transition-colors"
+                title="Zrušit — přejít do globálních"
               >
-                {msg.role === 'user' ? (
-                  msg.content
-                ) : (
-                  <>
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                      {msg.content || '\u200b'}
-                    </ReactMarkdown>
-                    {msg.streaming && !msg.content && !msg.activeToolEvent && (
-                      <Loader2 size={14} className="animate-spin inline-block" />
-                    )}
-                    {msg.streaming && msg.content && (
-                      <span className="inline-block w-1.5 h-3.5 bg-current ml-0.5 align-middle animate-pulse rounded-sm" />
-                    )}
-                  </>
-                )}
-              </div>
-              {msg.role === 'assistant' && msg.model && (
-                <span className="text-[10px] text-[var(--text-muted)] mt-0.5 px-1">
-                  {providers.flatMap(p => p.models).find(m => m.model === msg.model)?.label ?? msg.model.split('/').pop()}
-                </span>
-              )}
+                <X size={11} />
+              </button>
             </div>
-          ))}
-          <div ref={bottomRef} />
-        </div>
-
-        <ChatInput
-          onSend={handleSend}
-          disabled={sending}
-          webSearch={webSearch}
-          onWebSearchToggle={() => setWebSearch((v) => !v)}
-        />
-
-        <div className="flex justify-center py-1.5 bg-[var(--surface)] border-t border-[var(--border)] relative" ref={pickerRef}>
-          <button
-            onClick={() => setModelPickerOpen((o) => !o)}
-            className="flex items-center gap-1 text-xs text-[var(--text-muted)] hover:text-[var(--text)] transition-colors px-2 py-0.5 rounded-md hover:bg-[var(--surface-2)]"
-          >
-            <span>{provider} · {model}</span>
-            <ChevronDown size={12} className={modelPickerOpen ? 'rotate-180' : ''} style={{ transition: 'transform 0.15s' }} />
-          </button>
-
-          {modelPickerOpen && (
-            <div
-              onMouseDown={(e) => e.stopPropagation()}
-              className="absolute bottom-full mb-1 left-1/2 -translate-x-1/2 w-80 max-h-72 overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-xl z-50"
-            >
-              {providers.map((p) => (
-                <div key={p.id}>
-                  <div className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-widest text-[var(--text-muted)] border-b border-[var(--border)]">
-                    {p.id}
-                  </div>
-                  {p.models.map((m) => (
-                    <button
-                      key={m.model}
-                      onClick={() => handleModelSelect(m.provider, m.model)}
-                      className={[
-                        'w-full text-left px-3 py-2 text-xs transition-colors truncate',
-                        m.provider === provider && m.model === model
-                          ? 'bg-[var(--accent)]/15 text-[var(--text)]'
-                          : 'text-[var(--text-muted)] hover:bg-[var(--surface-2)] hover:text-[var(--text)]',
-                      ].join(' ')}
-                    >
-                      {m.label}
-                    </button>
-                  ))}
-                </div>
-              ))}
+          ) : (
+            <div className="flex items-center gap-1.5 text-xs text-[var(--text-muted)]">
+              <MessageSquare size={11} />
+              <span>Nová globální konverzace</span>
             </div>
           )}
         </div>
+      )}
+
+      {/* Model picker */}
+      <div className="flex justify-center py-1.5 bg-[var(--surface)] border-t border-[var(--border)] relative" ref={pickerRef}>
+        <button
+          onClick={() => setModelPickerOpen((o) => !o)}
+          className="flex items-center gap-1 text-xs text-[var(--text-muted)] hover:text-[var(--text)] transition-colors px-2 py-0.5 rounded-md hover:bg-[var(--surface-2)]"
+        >
+          <span>{provider} · {model}</span>
+          <ChevronDown size={12} className={modelPickerOpen ? 'rotate-180' : ''} style={{ transition: 'transform 0.15s' }} />
+        </button>
+
+        {modelPickerOpen && (
+          <div
+            onMouseDown={(e) => e.stopPropagation()}
+            className="absolute bottom-full mb-1 left-1/2 -translate-x-1/2 w-80 max-h-72 overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-xl z-50"
+          >
+            {providers.map((p) => (
+              <div key={p.id}>
+                <div className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-widest text-[var(--text-muted)] border-b border-[var(--border)]">
+                  {p.id}
+                </div>
+                {p.models.map((m) => (
+                  <button
+                    key={m.model}
+                    onClick={() => handleModelSelect(m.provider, m.model)}
+                    className={[
+                      'w-full text-left px-3 py-2 text-xs transition-colors truncate',
+                      m.provider === provider && m.model === model
+                        ? 'bg-[var(--accent)]/15 text-[var(--text)]'
+                        : 'text-[var(--text-muted)] hover:bg-[var(--surface-2)] hover:text-[var(--text)]',
+                    ].join(' ')}
+                  >
+                    {m.label}
+                  </button>
+                ))}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   )

@@ -1,8 +1,9 @@
 import { NavLink, Outlet, Navigate, useLocation } from 'react-router-dom'
-import { Cpu, Key, Server, Plug } from 'lucide-react'
+import { Cpu, Key, Server, Plug, FolderOpen } from 'lucide-react'
 
 const tabs = [
   { to: '/settings/model', icon: Cpu, label: 'Model' },
+  { to: '/settings/projects', icon: FolderOpen, label: 'Projekty' },
   { to: '/settings/mcp', icon: Key, label: 'MCP Server' },
   { to: '/settings/mcp-clients', icon: Plug, label: 'MCP Klienti' },
   { to: '/settings/connection', icon: Server, label: 'Připojení' },
@@ -17,7 +18,7 @@ export function SettingsLayout() {
   }
 
   return (
-    <div className="max-w-2xl mx-auto px-6 py-8 flex flex-col gap-6">
+    <div className="max-w-2xl mx-auto px-6 py-8 pb-16 flex flex-col gap-6">
       <h1 className="text-xl font-semibold text-[var(--text)]">Nastavení</h1>
 
       {/* Tab bar */}
