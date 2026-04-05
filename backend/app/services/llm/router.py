@@ -8,11 +8,15 @@ Podporované providery:
 """
 from __future__ import annotations
 
+import json
+import logging
 from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass, field
 from typing import Literal
 
 from app.core.config import settings
+
+log = logging.getLogger("dautuu.llm.router")
 
 Provider = Literal["together", "openai", "anthropic", "ollama"]
 
@@ -21,6 +25,12 @@ Provider = Literal["together", "openai", "anthropic", "ollama"]
 class ChatMessage:
     role: Literal["system", "user", "assistant"]
     content: str
+    # Pokud je nastaven, použije se místo automaticky generovaného {"role": ..., "content": ...}
+    # Slouží pro tool_call a tool_result zprávy kde formát závisí na provideru a nelze
+    # jej genericky vyjádřit přes role+content.
+    # Ignorováno pro Anthropic (ten má vlastní konverzi v _split_system).
+    _raw_openai: dict | None = field(default=None, repr=False)
+    _raw_anthropic: dict | None = field(default=None, repr=False)
 
 
 @dataclass
@@ -35,6 +45,31 @@ class ChatResponse:
     model: str
     provider: Provider
     usage: UsageInfo = field(default_factory=UsageInfo)
+
+
+@dataclass
+class ToolCall:
+    """Jeden tool call požadovaný LLM."""
+    name: str
+    args: dict
+    tool_call_id: str = ""   # ID přiřazené modelem (OpenAI/Together: tc.id, Anthropic: block.id)
+
+
+@dataclass
+class ToolCallResult:
+    """Výsledek LLM volání s tool callingem."""
+    tool_calls: list[ToolCall]     # prázdné = LLM odpověděl přímo
+    direct_content: str | None     # vyplněno pokud LLM odpověděl rovnou (žádné tool calls)
+    usage: UsageInfo = field(default_factory=UsageInfo)
+
+    # Zpětná kompatibilita — první tool call (nebo None)
+    @property
+    def tool_name(self) -> str | None:
+        return self.tool_calls[0].name if self.tool_calls else None
+
+    @property
+    def tool_args(self) -> dict | None:
+        return self.tool_calls[0].args if self.tool_calls else None
 
 
 async def chat(
@@ -53,6 +88,39 @@ async def chat(
         return await _anthropic_chat(messages, model, temperature, max_tokens)
     if provider == "ollama":
         return await _ollama_chat(messages, model, temperature, max_tokens)
+    raise ValueError(f"Neznámý provider: {provider}")
+
+
+async def chat_with_tools(
+    messages: list[ChatMessage],
+    model: str,
+    provider: Provider = "together",
+    tools: list[dict] | None = None,
+    temperature: float = 0.7,
+    max_tokens: int = 512,
+) -> ToolCallResult:
+    """LLM volání s tool definicemi — zjistí zda LLM chce volat tool(y).
+
+    Vrátí ToolCallResult:
+    - Pokud LLM chce zavolat tool(y): tool_calls je neprázdné
+    - Pokud LLM odpověděl přímo: direct_content je vyplněn, tool_calls je []
+    """
+    if not tools:
+        resp = await chat(messages, model, provider, temperature, max_tokens)
+        return ToolCallResult(
+            tool_calls=[],
+            direct_content=resp.content,
+            usage=resp.usage,
+        )
+
+    if provider == "openai":
+        return await _openai_chat_with_tools(messages, model, tools, temperature, max_tokens)
+    if provider == "anthropic":
+        return await _anthropic_chat_with_tools(messages, model, tools, temperature, max_tokens)
+    if provider == "together":
+        return await _together_chat_with_tools(messages, model, tools, temperature, max_tokens)
+    if provider == "ollama":
+        return await _ollama_chat_with_tools(messages, model, tools, temperature, max_tokens)
     raise ValueError(f"Neznámý provider: {provider}")
 
 
@@ -77,7 +145,7 @@ async def stream_with_usage(
 ) -> AsyncGenerator[tuple[str, UsageInfo | None], None]:
     """Streamuje tokeny ze zvoleného LLM.
 
-    Yields: (chunk_text, None) pro každý token; pak (\"\" , UsageInfo) jako poslední yield
+    Yields: (chunk_text, None) pro každý token; pak ("" , UsageInfo) jako poslední yield
     s vyplněným usage po skončení streamu.
     """
     if provider == "together":
@@ -101,7 +169,13 @@ async def stream_with_usage(
 # ---------------------------------------------------------------------------
 
 def _together_messages(messages: list[ChatMessage]) -> list[dict]:
-    return [{"role": m.role, "content": m.content} for m in messages]
+    result = []
+    for m in messages:
+        if m._raw_openai is not None:
+            result.append(m._raw_openai)
+        else:
+            result.append({"role": m.role, "content": m.content})
+    return result
 
 
 async def _together_chat(
@@ -122,6 +196,52 @@ async def _together_chat(
         output_tokens=resp.usage.completion_tokens if resp.usage else 0,
     )
     return ChatResponse(content=content, model=model, provider="together", usage=usage)
+
+
+async def _together_chat_with_tools(
+    messages: list[ChatMessage],
+    model: str,
+    tools: list[dict],
+    temperature: float,
+    max_tokens: int,
+) -> ToolCallResult:
+    """Together tool calling — používá OpenAI-kompatibilní formát."""
+    from together import AsyncTogether
+
+    client = AsyncTogether(api_key=settings.together_api_key)
+    try:
+        resp = await client.chat.completions.create(
+            model=model,
+            messages=_together_messages(messages),
+            tools=tools,
+            tool_choice="auto",
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        usage = UsageInfo(
+            input_tokens=resp.usage.prompt_tokens if resp.usage else 0,
+            output_tokens=resp.usage.completion_tokens if resp.usage else 0,
+        )
+        choice = resp.choices[0]
+        # Některé modely (DeepSeek, starší Llama) vrátí tool_calls ale s finish_reason="stop"
+        # Proto kontrolujeme přítomnost tool_calls v message, ne jen finish_reason
+        if choice.message.tool_calls:
+            calls = []
+            for tc in choice.message.tool_calls:
+                args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                calls.append(ToolCall(name=tc.function.name, args=args, tool_call_id=tc.id or ""))
+            log.debug("TOGETHER_TOOL_CALLS finish_reason=%r calls=%d", choice.finish_reason, len(calls))
+            return ToolCallResult(tool_calls=calls, direct_content=None, usage=usage)
+        log.debug("TOGETHER_DIRECT finish_reason=%r content_len=%d", choice.finish_reason, len(choice.message.content or ""))
+        return ToolCallResult(
+            tool_calls=[],
+            direct_content=choice.message.content or "",
+            usage=usage,
+        )
+    except Exception as exc:
+        log.warning("TOGETHER_TOOL_CALL_FAILED %s: %s — fallback bez toolů", type(exc).__name__, exc)
+        resp = await _together_chat(messages, model, temperature, max_tokens)
+        return ToolCallResult(tool_calls=[], direct_content=resp.content, usage=resp.usage)
 
 
 async def _together_stream_with_usage(
@@ -154,6 +274,16 @@ async def _together_stream_with_usage(
 # OpenAI
 # ---------------------------------------------------------------------------
 
+def _openai_messages(messages: list[ChatMessage]) -> list[dict]:
+    result = []
+    for m in messages:
+        if m._raw_openai is not None:
+            result.append(m._raw_openai)
+        else:
+            result.append({"role": m.role, "content": m.content})
+    return result
+
+
 async def _openai_chat(
     messages: list[ChatMessage], model: str, temperature: float, max_tokens: int
 ) -> ChatResponse:
@@ -162,7 +292,7 @@ async def _openai_chat(
     client = AsyncOpenAI(api_key=settings.openai_api_key)
     resp = await client.chat.completions.create(
         model=model,
-        messages=[{"role": m.role, "content": m.content} for m in messages],  # type: ignore[arg-type]
+        messages=_openai_messages(messages),  # type: ignore[arg-type]
         temperature=temperature,
         max_tokens=max_tokens,
     )
@@ -174,6 +304,42 @@ async def _openai_chat(
     return ChatResponse(content=content, model=model, provider="openai", usage=usage)
 
 
+async def _openai_chat_with_tools(
+    messages: list[ChatMessage],
+    model: str,
+    tools: list[dict],
+    temperature: float,
+    max_tokens: int,
+) -> ToolCallResult:
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    resp = await client.chat.completions.create(
+        model=model,
+        messages=_openai_messages(messages),  # type: ignore[arg-type]
+        tools=tools,  # type: ignore[arg-type]
+        tool_choice="auto",
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    usage = UsageInfo(
+        input_tokens=resp.usage.prompt_tokens if resp.usage else 0,
+        output_tokens=resp.usage.completion_tokens if resp.usage else 0,
+    )
+    choice = resp.choices[0]
+    if choice.message.tool_calls:
+        calls = []
+        for tc in choice.message.tool_calls:
+            args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+            calls.append(ToolCall(name=tc.function.name, args=args, tool_call_id=tc.id or ""))
+        return ToolCallResult(tool_calls=calls, direct_content=None, usage=usage)
+    return ToolCallResult(
+        tool_calls=[],
+        direct_content=choice.message.content or "",
+        usage=usage,
+    )
+
+
 async def _openai_stream_with_usage(
     messages: list[ChatMessage], model: str, temperature: float, max_tokens: int
 ) -> AsyncGenerator[tuple[str, UsageInfo | None], None]:
@@ -183,7 +349,7 @@ async def _openai_stream_with_usage(
     usage = UsageInfo()
     s = await client.chat.completions.create(
         model=model,
-        messages=[{"role": m.role, "content": m.content} for m in messages],  # type: ignore[arg-type]
+        messages=_openai_messages(messages),  # type: ignore[arg-type]
         temperature=temperature,
         max_tokens=max_tokens,
         stream=True,
@@ -206,15 +372,17 @@ async def _openai_stream_with_usage(
 # Anthropic
 # ---------------------------------------------------------------------------
 
-def _split_system(messages: list[ChatMessage]) -> tuple[str, list[ChatMessage]]:
-    """Anthropic přijímá system prompt zvlášť."""
+def _split_system(messages: list[ChatMessage]) -> tuple[str, list[dict]]:
+    """Anthropic přijímá system prompt zvlášť. Vrátí (system_text, messages_as_dicts)."""
     system = ""
-    rest: list[ChatMessage] = []
+    rest: list[dict] = []
     for m in messages:
         if m.role == "system":
             system += m.content + "\n"
+        elif m._raw_anthropic is not None:
+            rest.append(m._raw_anthropic)
         else:
-            rest.append(m)
+            rest.append({"role": m.role, "content": m.content})
     return system.strip(), rest
 
 
@@ -227,7 +395,7 @@ async def _anthropic_chat(
     system, rest = _split_system(messages)
     kwargs: dict = dict(
         model=model,
-        messages=[{"role": m.role, "content": m.content} for m in rest],
+        messages=rest,
         temperature=temperature,
         max_tokens=max_tokens,
     )
@@ -242,6 +410,52 @@ async def _anthropic_chat(
     return ChatResponse(content=content, model=model, provider="anthropic", usage=usage)
 
 
+async def _anthropic_chat_with_tools(
+    messages: list[ChatMessage],
+    model: str,
+    tools: list[dict],
+    temperature: float,
+    max_tokens: int,
+) -> ToolCallResult:
+    import anthropic
+
+    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+    system, rest = _split_system(messages)
+    kwargs: dict = dict(
+        model=model,
+        messages=rest,
+        tools=tools,  # type: ignore[arg-type]
+        tool_choice={"type": "auto"},
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    if system:
+        kwargs["system"] = system
+    resp = await client.messages.create(**kwargs)
+    usage = UsageInfo(
+        input_tokens=resp.usage.input_tokens if resp.usage else 0,
+        output_tokens=resp.usage.output_tokens if resp.usage else 0,
+    )
+    calls = []
+    text_parts = []
+    for block in resp.content:
+        if block.type == "tool_use":
+            calls.append(ToolCall(
+                name=block.name,
+                args=block.input if isinstance(block.input, dict) else {},
+                tool_call_id=block.id or "",
+            ))
+        elif hasattr(block, "text"):
+            text_parts.append(block.text)
+    if calls:
+        return ToolCallResult(tool_calls=calls, direct_content=None, usage=usage)
+    return ToolCallResult(
+        tool_calls=[],
+        direct_content="".join(text_parts),
+        usage=usage,
+    )
+
+
 async def _anthropic_stream_with_usage(
     messages: list[ChatMessage], model: str, temperature: float, max_tokens: int
 ) -> AsyncGenerator[tuple[str, UsageInfo | None], None]:
@@ -251,7 +465,7 @@ async def _anthropic_stream_with_usage(
     system, rest = _split_system(messages)
     kwargs: dict = dict(
         model=model,
-        messages=[{"role": m.role, "content": m.content} for m in rest],
+        messages=rest,
         temperature=temperature,
         max_tokens=max_tokens,
     )
@@ -281,7 +495,7 @@ async def _ollama_chat(
 
     payload = {
         "model": model,
-        "messages": [{"role": m.role, "content": m.content} for m in messages],
+        "messages": _together_messages(messages),
         "stream": False,
         "options": {"temperature": temperature, "num_predict": max_tokens},
     }
@@ -297,15 +511,61 @@ async def _ollama_chat(
     return ChatResponse(content=content, model=model, provider="ollama", usage=usage)
 
 
+async def _ollama_chat_with_tools(
+    messages: list[ChatMessage],
+    model: str,
+    tools: list[dict],
+    temperature: float,
+    max_tokens: int,
+) -> ToolCallResult:
+    import httpx
+
+    payload = {
+        "model": model,
+        "messages": _together_messages(messages),
+        "tools": tools,
+        "stream": False,
+        "options": {"temperature": temperature, "num_predict": max_tokens},
+    }
+    try:
+        async with httpx.AsyncClient(base_url=settings.ollama_base_url, timeout=120) as client:
+            resp = await client.post("/api/chat", json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+            msg = data.get("message", {})
+            tool_calls_raw = msg.get("tool_calls", [])
+            usage = UsageInfo(
+                input_tokens=data.get("prompt_eval_count", 0),
+                output_tokens=data.get("eval_count", 0),
+            )
+            if tool_calls_raw:
+                calls = []
+                for tc in tool_calls_raw:
+                    fn = tc.get("function", {})
+                    args = fn.get("arguments", {})
+                    if isinstance(args, str):
+                        args = json.loads(args)
+                    calls.append(ToolCall(name=fn.get("name", ""), args=args, tool_call_id=""))
+                return ToolCallResult(tool_calls=calls, direct_content=None, usage=usage)
+            return ToolCallResult(
+                tool_calls=[],
+                direct_content=msg.get("content", ""),
+                usage=usage,
+            )
+    except Exception as exc:
+        log.warning("OLLAMA_TOOL_CALL_FAILED %s: %s — fallback bez toolů", type(exc).__name__, exc)
+        resp_obj = await _ollama_chat(messages, model, temperature, max_tokens)
+        return ToolCallResult(tool_calls=[], direct_content=resp_obj.content, usage=resp_obj.usage)
+
+
 async def _ollama_stream_with_usage(
     messages: list[ChatMessage], model: str, temperature: float, max_tokens: int
 ) -> AsyncGenerator[tuple[str, UsageInfo | None], None]:
     import httpx
-    import json
 
     payload = {
         "model": model,
-        "messages": [{"role": m.role, "content": m.content} for m in messages],
+        "messages": _together_messages(messages),
         "stream": True,
         "options": {"temperature": temperature, "num_predict": max_tokens},
     }

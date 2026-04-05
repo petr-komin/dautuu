@@ -1,11 +1,12 @@
 """Ceníky AI modelů — ceny v USD za 1 milion tokenů / jednotku.
 
-Aktualizováno: 2026-03-30
+Aktualizováno: 2026-04-01
 
 Zdroje:
   Together AI  — https://together.ai/pricing
   Anthropic    — https://www.anthropic.com/pricing
   OpenAI       — https://openai.com/pricing
+  Tavily       — https://tavily.com/#pricing
 
 Struktura:
   CHAT_PRICING[provider][model] = {"input": float, "output": float}   ← $/M tokenů
@@ -13,6 +14,7 @@ Struktura:
   IMAGE_PRICING[provider][model] = float                              ← $/obrázek nebo $/megapixel
   TTS_PRICING[provider][model] = float                                ← $/M znaků
   STT_PRICING[provider][model] = float                                ← $/minutu
+  SEARCH_PRICING[provider][depth] = float                             ← $/1000 requestů
 
 Ollama (lokální) nemá cenu — vrátíme None.
 """
@@ -36,8 +38,23 @@ CHAT_PRICING: dict[str, dict[str, dict[str, float]]] = {
         "deepseek-ai/DeepSeek-R1-0528":                               {"input": 3.00,  "output": 7.00},
         "deepseek-ai/DeepSeek-R1":                                    {"input": 3.00,  "output": 7.00},
         # Qwen
+        "Qwen/Qwen3.5-397B-A17B":                                    {"input": 0.60,  "output": 3.60},
+        "Qwen/Qwen3.5-9B":                                            {"input": 0.10,  "output": 0.15},
+        "Qwen/Qwen3-235B-A22B-Instruct-2507-tput":                   {"input": 0.20,  "output": 0.60},
+        "Qwen/Qwen3-235B-A22B-Thinking-2507":                        {"input": 0.65,  "output": 3.00},
+        "Qwen/Qwen3-Next-80B-A3B-Instruct":                          {"input": 0.15,  "output": 1.50},
+        "Qwen/Qwen3-Next-80B-A3B-Thinking":                          {"input": 0.15,  "output": 1.50},
+        "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8":                   {"input": 2.00,  "output": 2.00},
+        "Qwen/Qwen3-Coder-Next-FP8":                                  {"input": 0.50,  "output": 1.20},
+        "Qwen/Qwen3-VL-32B-Instruct":                                 {"input": 0.50,  "output": 1.50},
+        "Qwen/Qwen3-VL-8B-Instruct":                                  {"input": 0.18,  "output": 0.68},
         "Qwen/Qwen2.5-7B-Instruct-Turbo":                            {"input": 0.30,  "output": 0.30},
         "Qwen/Qwen2.5-72B-Instruct-Turbo":                           {"input": 1.20,  "output": 1.20},
+        "Qwen/Qwen2.5-72B-Instruct":                                  {"input": 1.20,  "output": 1.20},
+        "Qwen/Qwen2.5-Coder-32B-Instruct":                           {"input": 0.80,  "output": 0.80},
+        "Qwen/Qwen2.5-14B-Instruct":                                  {"input": 0.80,  "output": 0.80},
+        "Qwen/Qwen2-VL-72B-Instruct":                                 {"input": 1.20,  "output": 1.20},
+        "Qwen/Qwen2.5-VL-72B-Instruct":                              {"input": 1.95,  "output": 8.00},
         "Qwen/QwQ-32B":                                               {"input": 1.20,  "output": 1.20},
         # Mistral
         "mistralai/Mistral-7B-Instruct-v0.2":                        {"input": 0.20,  "output": 0.20},
@@ -153,6 +170,18 @@ STT_PRICING: dict[str, dict[str, float]] = {
     },
 }
 
+# ---------------------------------------------------------------------------
+# Web Search  ($/1000 requestů)
+# ---------------------------------------------------------------------------
+
+SEARCH_PRICING: dict[str, dict[str, float]] = {
+    "tavily": {
+        # search_depth parametr = "basic" nebo "advanced"
+        "basic":    5.0,   # $5 / 1000 requestů
+        "advanced": 10.0,  # $10 / 1000 requestů
+    },
+}
+
 
 # ---------------------------------------------------------------------------
 # Pomocné funkce
@@ -178,3 +207,11 @@ def get_embedding_cost(provider: str, model: str, input_tokens: int) -> float | 
     if price is None:
         return None
     return input_tokens * price / 1_000_000
+
+
+def get_search_cost(provider: str, search_depth: str = "basic", num_requests: int = 1) -> float | None:
+    """Vrátí cenu v USD pro web search requesty. None = neznámý provider."""
+    price_per_1k = SEARCH_PRICING.get(provider, {}).get(search_depth)
+    if price_per_1k is None:
+        return None
+    return num_requests * price_per_1k / 1000

@@ -18,6 +18,12 @@ export interface DailyStats {
   cost_usd: number | null
 }
 
+export interface SearchStats {
+  total_requests: number
+  total_results: number
+  cost_usd: number | null
+}
+
 export interface UsageStats {
   total_calls: number
   total_input_tokens: number
@@ -25,6 +31,7 @@ export interface UsageStats {
   total_cost_usd: number | null
   by_model: ModelStats[]
   by_day: DailyStats[]
+  web_search: SearchStats
 }
 
 export async function fetchUsageStats(): Promise<UsageStats> {

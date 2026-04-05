@@ -22,12 +22,18 @@ export async function getMessages(conversationId: string): Promise<MessageOut[]>
   return res.data
 }
 
+export type ToolEvent =
+  | { type: 'search'; query: string }
+  | { type: 'tool'; name: string; path: string }
+
 export async function sendMessageStream(params: {
   conversationId: string | null
   message: string
   provider: string
   model: string
+  webSearch: boolean
   onChunk: (chunk: string) => void
+  onToolEvent: (event: ToolEvent) => void
   onDone: (conversationId: string) => void
 }): Promise<void> {
   const token = (await import('../store/authStore')).useAuthStore.getState().token
@@ -44,6 +50,7 @@ export async function sendMessageStream(params: {
       provider: params.provider,
       model: params.model,
       stream: true,
+      web_search: params.webSearch,
     }),
   })
 
@@ -64,10 +71,26 @@ export async function sendMessageStream(params: {
     for (const line of text.split('\n')) {
       if (!line.startsWith('data: ')) continue
       const data = line.slice(6)
+
       if (data === '[DONE]') {
         params.onDone(convId)
         return
       }
+
+      // Web search: [SEARCHING:query]
+      const searchMatch = data.match(/^\[SEARCHING:(.+)\]$/)
+      if (searchMatch) {
+        params.onToolEvent({ type: 'search', query: searchMatch[1] })
+        continue
+      }
+
+      // File tool: [TOOL:tool_name:path]
+      const toolMatch = data.match(/^\[TOOL:([^:]+):?(.*)\]$/)
+      if (toolMatch) {
+        params.onToolEvent({ type: 'tool', name: toolMatch[1], path: toolMatch[2] })
+        continue
+      }
+
       params.onChunk(data)
     }
   }

@@ -12,13 +12,35 @@
 #   docker compose -f docker-compose.host-db.yml up -d
 
 services:
+  mcp-redmine:
+    build:
+      context: ./mcp-redmine
+    restart: unless-stopped
+    ports:
+      - "8002:8000"
+    environment:
+      REDMINE_URL: ${REDMINE_URL}
+      REDMINE_API_KEY: ${REDMINE_API_KEY}
+      REDMINE_RESPONSE_FORMAT: ${REDMINE_RESPONSE_FORMAT:-yaml}
+      # Vypne DNS rebinding protection — nutné pro přístup z backend kontejneru
+      FASTMCP_TRANSPORT_SECURITY__ENABLE_DNS_REBINDING_PROTECTION: "false"
+
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      args:
+        # UID/GID hosta — soubory v workspace budou vlastněny tímto uživatelem.
+        # Změň pokud se tvůj UID liší od 1000: APP_UID=1001
+        APP_UID: ${APP_UID:-1000}
+        APP_GID: ${APP_GID:-1000}
     restart: unless-stopped
     ports:
       - "8001:8000"
     env_file:
       - .env
+    environment:
+      # Cesta k pracovnímu adresáři AI agenta uvnitř kontejneru (neměň)
+      AGENT_WORKSPACE: /workspace
     # host.docker.internal funguje na Docker Desktop (Mac/Windows)
     # Na Linux přidej: extra_hosts: ["host.docker.internal:host-gateway"]
     extra_hosts:
@@ -26,4 +48,6 @@ services:
     volumes:
       # Pro lokální vývoj — live reload bez rebuildu
       - ./backend:/app
+      # Pracovní adresář AI agenta — uprav cestu na hostu dle potřeby
+      - ${AGENT_WORKSPACE_HOST:-./workspace}:/workspace
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload

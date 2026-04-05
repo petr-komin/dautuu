@@ -20,6 +20,7 @@ SUMMARIZE_AFTER_IDLE = timedelta(minutes=30)
 # Počet výsledků z vector search
 TOP_K_MESSAGES = 5
 TOP_K_SUMMARIES = 3
+TOP_K_MCP = 4
 
 
 # ---------------------------------------------------------------------------
@@ -32,6 +33,9 @@ async def index_message(message_id: UUID, db: AsyncSession) -> None:
     msg = result.scalar_one_or_none()
     if not msg or msg.embedding is not None:
         return  # už zaindexováno nebo nenalezeno
+    # Tool zprávy neindexujeme — jsou dočasný kontext, ne paměť uživatele
+    if msg.role in ("tool_call", "tool"):
+        return
 
     try:
         msg.embedding = await embed(msg.content, db=db)
@@ -127,13 +131,14 @@ async def retrieve_memory(
         log.error("EMBED_QUERY_ERROR: %s", exc)
         return ""
 
-    # 1. Hledej podobné zprávy z JINÝCH konverzací
+    # 1. Hledej podobné zprávy z JINÝCH normálních konverzací (ne MCP memory)
     similar_messages = await db.execute(
         select(Message, Conversation)
         .join(Conversation, Message.conversation_id == Conversation.id)
         .where(
             Conversation.user_id == user_id,
             Conversation.id != current_conv_id,
+            Conversation.is_mcp_memory == False,  # noqa: E712
             Message.embedding.isnot(None),
             Message.role == "assistant",
         )
@@ -142,12 +147,13 @@ async def retrieve_memory(
     )
     msg_rows = similar_messages.all()
 
-    # 2. Hledej podobné souhrny konverzací
+    # 2. Hledej podobné souhrny konverzací (jen normální konverzace)
     similar_summaries = await db.execute(
         select(Conversation)
         .where(
             Conversation.user_id == user_id,
             Conversation.id != current_conv_id,
+            Conversation.is_mcp_memory == False,  # noqa: E712
             Conversation.summary_embedding.isnot(None),
         )
         .order_by(Conversation.summary_embedding.cosine_distance(query_emb))
@@ -155,7 +161,22 @@ async def retrieve_memory(
     )
     summary_rows = similar_summaries.scalars().all()
 
-    if not msg_rows and not summary_rows:
+    # 3. Hledej v MCP memory vzpomínkách uživatele
+    similar_mcp = await db.execute(
+        select(Message)
+        .join(Conversation, Message.conversation_id == Conversation.id)
+        .where(
+            Conversation.user_id == user_id,
+            Conversation.is_mcp_memory == True,  # noqa: E712
+            Message.embedding.isnot(None),
+            Message.role == "assistant",
+        )
+        .order_by(Message.embedding.cosine_distance(query_emb))
+        .limit(TOP_K_MCP)
+    )
+    mcp_rows = similar_mcp.scalars().all()
+
+    if not msg_rows and not summary_rows and not mcp_rows:
         return ""
 
     parts: list[str] = []
@@ -172,7 +193,13 @@ async def retrieve_memory(
             date = conv.created_at.strftime("%d.%m.%Y")
             parts.append(f"[{date} — {conv.title}]\nAsistent: {msg.content[:400]}")
 
+    if mcp_rows:
+        parts.append("## Relevantní vzpomínky z dlouhodobé paměti")
+        for msg in mcp_rows:
+            project_label = f" [{msg.mcp_project}]" if msg.mcp_project else ""
+            parts.append(f"{msg.content[:400]}{project_label}")
+
     memory_block = "\n\n".join(parts)
-    log.info("MEMORY retrieved %d summaries + %d messages for query '%s...'",
-             len(summary_rows), len(msg_rows), query[:50])
+    log.info("MEMORY retrieved %d summaries + %d messages + %d mcp for query '%s...'",
+             len(summary_rows), len(msg_rows), len(mcp_rows), query[:50])
     return memory_block

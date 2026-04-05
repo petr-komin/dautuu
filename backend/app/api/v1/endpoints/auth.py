@@ -69,6 +69,39 @@ async def login(form: OAuth2PasswordRequestForm = Depends(), db: AsyncSession = 
     return TokenResponse(access_token=token)
 
 
+class ApiKeyResponse(BaseModel):
+    api_key: uuid.UUID
+    user_id: uuid.UUID
+
+
 @router.get("/me", response_model=UserResponse)
 async def me(current_user: User = Depends(get_current_user)):
     return current_user
+
+
+@router.post("/api-key", response_model=ApiKeyResponse)
+async def generate_api_key(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Vygeneruje (nebo přegeneruje) MCP API klíč pro přihlášeného uživatele.
+
+    Klíč se použije jako Bearer token pro MCP endpoint:
+      GET /api/v1/mcp/{user_id}/sse
+      Authorization: Bearer <api_key>
+    """
+    current_user.api_key = uuid.uuid4()
+    await db.commit()
+    await db.refresh(current_user)
+    return ApiKeyResponse(api_key=current_user.api_key, user_id=current_user.id)
+
+
+@router.get("/api-key", response_model=ApiKeyResponse)
+async def get_api_key(current_user: User = Depends(get_current_user)):
+    """Vrátí aktuální MCP API klíč. Pokud nebyl vygenerován, vrátí 404."""
+    if not current_user.api_key:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="API klíč nebyl dosud vygenerován. Použij POST /auth/api-key.",
+        )
+    return ApiKeyResponse(api_key=current_user.api_key, user_id=current_user.id)

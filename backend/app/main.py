@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.db.init_db import init_db
 from app.api.v1.router import api_router
+from app.services.usage.pricing_sync import sync_pricing, invalidate_pricing_cache
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,6 +25,8 @@ logging.getLogger("anthropic").setLevel(logging.WARNING)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    invalidate_pricing_cache()   # vymaž cache před syncí (důležité při hot-reload)
+    await sync_pricing()
     yield
 
 

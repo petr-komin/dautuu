@@ -1,7 +1,6 @@
 """Usage API — přehled spotřeby tokenů a nákladů."""
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -39,6 +38,13 @@ class DailyStats(BaseModel):
     cost_usd: float | None
 
 
+class SearchStats(BaseModel):
+    """Souhrnné statistiky web search requestů."""
+    total_requests: int
+    total_results: int       # součet num_results přes všechny requesty
+    cost_usd: float | None
+
+
 class UsageStats(BaseModel):
     total_calls: int
     total_input_tokens: int
@@ -46,6 +52,7 @@ class UsageStats(BaseModel):
     total_cost_usd: float | None
     by_model: list[ModelStats]
     by_day: list[DailyStats]
+    web_search: SearchStats
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +111,20 @@ async def get_usage_stats(
     )
     totals = total_result.one()
 
+    # Web search statistiky
+    search_result = await db.execute(
+        select(
+            func.count(UsageLog.id).label("requests"),
+            func.coalesce(func.sum(UsageLog.units), 0).label("total_results"),
+            func.sum(UsageLog.cost_usd).label("cost_usd"),
+        )
+        .where(
+            UsageLog.user_id == current_user.id,
+            UsageLog.operation == "web_search",
+        )
+    )
+    search_totals = search_result.one()
+
     def _cost(val: Decimal | None) -> float | None:
         return float(val) if val is not None else None
 
@@ -134,4 +155,9 @@ async def get_usage_stats(
             )
             for r in day_rows
         ],
+        web_search=SearchStats(
+            total_requests=search_totals.requests or 0,
+            total_results=int(search_totals.total_results or 0),
+            cost_usd=_cost(search_totals.cost_usd),
+        ),
     )

@@ -61,3 +61,29 @@ export async function savePreference(provider: string, model: string): Promise<P
   const res = await api.put<Preference>('/providers/preference', { provider, model })
   return res.data
 }
+
+// -------------------------------------------------------------------------
+// MCP API klíč
+// -------------------------------------------------------------------------
+
+export interface ApiKeyResponse {
+  api_key: string
+  user_id: string
+}
+
+/** Vrátí aktuální MCP API klíč (nebo null pokud ještě nebyl vygenerován). */
+export async function fetchApiKey(): Promise<ApiKeyResponse | null> {
+  try {
+    const res = await api.get<ApiKeyResponse>('/auth/api-key')
+    return res.data
+  } catch (err: any) {
+    if (err?.response?.status === 404) return null
+    throw err
+  }
+}
+
+/** Vygeneruje nový MCP API klíč (přepíše stávající). */
+export async function generateApiKey(): Promise<ApiKeyResponse> {
+  const res = await api.post<ApiKeyResponse>('/auth/api-key')
+  return res.data
+}

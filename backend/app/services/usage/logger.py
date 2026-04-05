@@ -8,7 +8,8 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import UsageLog
-from app.services.usage.pricing import get_chat_cost, get_embedding_cost
+from app.services.usage.pricing import get_chat_cost, get_embedding_cost, get_search_cost
+from app.services.usage.pricing_sync import get_chat_cost_from_db
 
 log = logging.getLogger("dautuu.usage")
 
@@ -25,7 +26,11 @@ async def log_chat_usage(
     message_id: UUID | None = None,
 ) -> None:
     """Zaznamená spotřebu tokenů a cenu pro jedno chat volání."""
-    cost = get_chat_cost(provider, model, input_tokens, output_tokens)
+    # Primárně cena z DB (aktuální, synchronizovaná při startu)
+    cost = await get_chat_cost_from_db(provider, model, input_tokens, output_tokens)
+    # Fallback na hardcoded ceník pokud DB cena chybí
+    if cost is None:
+        cost = get_chat_cost(provider, model, input_tokens, output_tokens)
     entry = UsageLog(
         user_id=user_id,
         conversation_id=conversation_id,
@@ -170,4 +175,40 @@ async def log_stt_usage(
         await db.commit()
     except Exception as exc:
         log.error("USAGE_LOG_ERROR stt: %s", exc)
+        await db.rollback()
+
+
+async def log_search_usage(
+    db: AsyncSession,
+    *,
+    query: str,
+    provider: str = "tavily",
+    search_depth: str = "basic",
+    num_results: int = 0,
+    success: bool = True,
+    user_id: UUID | None = None,
+    conversation_id: UUID | None = None,
+) -> None:
+    """Zaznamená jeden web search request — query, výsledky, cenu."""
+    cost = get_search_cost(provider, search_depth, num_requests=1)
+    entry = UsageLog(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        operation="web_search",
+        provider=provider,
+        model=search_depth,          # basic | advanced — jako "model"
+        query_text=query,
+        units=Decimal(str(num_results)),
+        units_type="results",
+        cost_usd=Decimal(str(cost)) if cost is not None else None,
+    )
+    db.add(entry)
+    try:
+        await db.commit()
+        log.info(
+            "USAGE web_search provider=%s depth=%s results=%d success=%s cost=$%.6f query=%r",
+            provider, search_depth, num_results, success, cost or 0, query,
+        )
+    except Exception as exc:
+        log.error("USAGE_LOG_ERROR web_search: %s", exc)
         await db.rollback()

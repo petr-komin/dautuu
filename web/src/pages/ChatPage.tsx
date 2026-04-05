@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { Send, Plus, MessageSquare, Loader2, ChevronDown } from 'lucide-react'
+import { Plus, MessageSquare, Loader2, ChevronDown, Globe, FileText, FolderOpen, FilePlus, Trash2 } from 'lucide-react'
 import toast from 'react-hot-toast'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -11,38 +11,63 @@ import {
   sendMessageStream,
   type ConversationOut,
   type MessageOut,
+  type ToolEvent,
 } from '../api/chat'
+import { ChatInput } from '../components/chat/ChatInput'
 
-// ---------------------------------------------------------------------------
-// Zpráva v UI (může být i streamovaná — role assistant s prázdným contentem)
-// ---------------------------------------------------------------------------
+const WEB_SEARCH_STORAGE_KEY = 'dautuu:webSearch'
+
+function toolEventLabel(event: ToolEvent): string {
+  if (event.type === 'search') return `Hledám: ${event.query}`
+  const labels: Record<string, string> = {
+    read_file: 'Čtu soubor',
+    write_file: 'Zapisuji soubor',
+    list_files: 'Procházím adresář',
+    create_directory: 'Vytvářím adresář',
+    delete_file: 'Mažu soubor',
+  }
+  const label = labels[event.name] ?? event.name
+  return event.path ? `${label}: ${event.path}` : label
+}
+
+function toolEventIcon(event: ToolEvent) {
+  if (event.type === 'search') return <Globe size={12} className="shrink-0" />
+  const icons: Record<string, React.ReactNode> = {
+    read_file: <FileText size={12} className="shrink-0" />,
+    write_file: <FilePlus size={12} className="shrink-0" />,
+    list_files: <FolderOpen size={12} className="shrink-0" />,
+    create_directory: <FolderOpen size={12} className="shrink-0" />,
+    delete_file: <Trash2 size={12} className="shrink-0" />,
+  }
+  return icons[event.name] ?? <FileText size={12} className="shrink-0" />
+}
+
 interface UiMessage {
   id: string
   role: 'user' | 'assistant'
   content: string
   model?: string | null
   streaming?: boolean
+  activeToolEvent?: ToolEvent | null
 }
 
-// ---------------------------------------------------------------------------
-// Hlavní stránka
-// ---------------------------------------------------------------------------
 export function ChatPage() {
   const [conversations, setConversations] = useState<ConversationOut[]>([])
   const [activeConvId, setActiveConvId] = useState<string | null>(null)
   const [messages, setMessages] = useState<UiMessage[]>([])
-  const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
   const [provider, setProvider] = useState('together')
   const [model, setModel] = useState('meta-llama/Llama-3.3-70B-Instruct-Turbo')
   const [providers, setProviders] = useState<ProviderInfo[]>([])
   const [modelPickerOpen, setModelPickerOpen] = useState(false)
+  const [webSearch, setWebSearch] = useState<boolean>(() => {
+    const stored = localStorage.getItem(WEB_SEARCH_STORAGE_KEY)
+    return stored === null ? true : stored === 'true'
+  })
 
   const bottomRef = useRef<HTMLDivElement>(null)
-  const textareaRef = useRef<HTMLTextAreaElement>(null)
   const pickerRef = useRef<HTMLDivElement>(null)
 
-  // Načtení konverzací a preference modelu
   useEffect(() => {
     listConversations().then(setConversations).catch(() => {})
     Promise.all([fetchPreference(), fetchProviders()])
@@ -54,7 +79,10 @@ export function ChatPage() {
       .catch(() => {})
   }, [])
 
-  // Zavřít picker kliknutím mimo
+  useEffect(() => {
+    localStorage.setItem(WEB_SEARCH_STORAGE_KEY, String(webSearch))
+  }, [webSearch])
+
   useEffect(() => {
     function handleClick(e: MouseEvent) {
       if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
@@ -65,7 +93,6 @@ export function ChatPage() {
     return () => document.removeEventListener('mousedown', handleClick)
   }, [])
 
-  // Scroll na konec při nových zprávách
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
@@ -90,20 +117,15 @@ export function ChatPage() {
     setMessages([])
   }
 
-  async function handleSend() {
-    const text = input.trim()
-    if (!text || sending) return
-
-    setInput('')
+  async function handleSend(text: string) {
     setSending(true)
 
-    // Optimisticky přidej uživatelovu zprávu
     const tempUserId = crypto.randomUUID()
     const tempBotId = crypto.randomUUID()
     setMessages((prev) => [
       ...prev,
       { id: tempUserId, role: 'user', content: text },
-      { id: tempBotId, role: 'assistant', content: '', model, streaming: true },
+      { id: tempBotId, role: 'assistant', content: '', model, streaming: true, activeToolEvent: null },
     ])
 
     try {
@@ -112,16 +134,25 @@ export function ChatPage() {
         message: text,
         provider,
         model,
+        webSearch,
+        onToolEvent: (event) => {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === tempBotId ? { ...m, activeToolEvent: event } : m
+            )
+          )
+        },
         onChunk: (chunk) => {
           setMessages((prev) =>
             prev.map((m) =>
-              m.id === tempBotId ? { ...m, content: m.content + chunk } : m
+              m.id === tempBotId
+                ? { ...m, content: m.content + chunk, activeToolEvent: null }
+                : m
             )
           )
         },
         onDone: (convId) => {
           const finalConvId = convId || activeConvId
-          // Nahraď streamed content čistými daty z DB
           if (finalConvId) {
             getMessages(finalConvId)
               .then((msgs) =>
@@ -132,21 +163,20 @@ export function ChatPage() {
                     content: m.content,
                     model: m.model,
                     streaming: false,
+                    activeToolEvent: null,
                   }))
                 )
               )
               .catch(() => {
-                // Fallback — aspoň ukonči streaming flag
                 setMessages((prev) =>
-                  prev.map((m) => (m.id === tempBotId ? { ...m, streaming: false } : m))
+                  prev.map((m) => (m.id === tempBotId ? { ...m, streaming: false, activeToolEvent: null } : m))
                 )
               })
           } else {
             setMessages((prev) =>
-              prev.map((m) => (m.id === tempBotId ? { ...m, streaming: false } : m))
+              prev.map((m) => (m.id === tempBotId ? { ...m, streaming: false, activeToolEvent: null } : m))
             )
           }
-          // Pokud to byla nová konverzace, přidej ji do listu
           if (!activeConvId && convId) {
             setActiveConvId(convId)
             listConversations().then(setConversations).catch(() => {})
@@ -157,7 +187,6 @@ export function ChatPage() {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Chyba při odesílání'
       toast.error(msg)
-      // Odstraň prázdnou bot zprávu
       setMessages((prev) => prev.filter((m) => m.id !== tempBotId))
       setSending(false)
     }
@@ -174,20 +203,9 @@ export function ChatPage() {
     }
   }
 
-  function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      handleSend()
-    }
-  }
-
-  function handleInput(e: React.ChangeEvent<HTMLTextAreaElement>) {
-    setInput(e.target.value)
-  }
-
   return (
     <div className="flex h-full overflow-hidden">
-      {/* Sidebar s konverzacemi */}
+      {/* Sidebar */}
       <aside className="w-56 shrink-0 flex flex-col border-r border-[var(--border)] bg-[var(--surface)]">
         <div className="p-3 border-b border-[var(--border)]">
           <button
@@ -221,7 +239,6 @@ export function ChatPage() {
 
       {/* Hlavní chat oblast */}
       <div className="flex-1 flex flex-col min-w-0">
-        {/* Zprávy */}
         <div className="flex-1 overflow-y-auto px-4 py-6 flex flex-col gap-4">
           {messages.length === 0 && (
             <div className="flex-1 flex flex-col items-center justify-center text-[var(--text-muted)] gap-3 select-none">
@@ -234,6 +251,12 @@ export function ChatPage() {
               key={msg.id}
               className={['flex flex-col', msg.role === 'user' ? 'items-end' : 'items-start'].join(' ')}
             >
+              {msg.role === 'assistant' && msg.activeToolEvent && (
+                <div className="flex items-center gap-1.5 text-xs text-[var(--text-muted)] mb-1.5 px-1 animate-pulse">
+                  {toolEventIcon(msg.activeToolEvent)}
+                  <span>{toolEventLabel(msg.activeToolEvent)}</span>
+                </div>
+              )}
               <div
                 className={[
                   'max-w-[75%] rounded-2xl px-4 py-2.5 text-sm break-words',
@@ -249,8 +272,12 @@ export function ChatPage() {
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>
                       {msg.content || '\u200b'}
                     </ReactMarkdown>
-                    {msg.streaming && !msg.content && <Loader2 size={14} className="animate-spin inline-block" />}
-                    {msg.streaming && msg.content && <span className="inline-block w-1.5 h-3.5 bg-current ml-0.5 align-middle animate-pulse rounded-sm" />}
+                    {msg.streaming && !msg.content && !msg.activeToolEvent && (
+                      <Loader2 size={14} className="animate-spin inline-block" />
+                    )}
+                    {msg.streaming && msg.content && (
+                      <span className="inline-block w-1.5 h-3.5 bg-current ml-0.5 align-middle animate-pulse rounded-sm" />
+                    )}
                   </>
                 )}
               </div>
@@ -264,76 +291,50 @@ export function ChatPage() {
           <div ref={bottomRef} />
         </div>
 
-        {/* Input */}
-        <div className="px-4 py-3 border-t border-[var(--border)] bg-[var(--surface)]">
-          <div className="flex items-end gap-2 max-w-3xl mx-auto">
-            <textarea
-              ref={textareaRef}
-              value={input}
-              onChange={handleInput}
-              onKeyDown={handleKeyDown}
-              placeholder="Napiš zprávu… (Enter odešle, Shift+Enter nový řádek)"
-              rows={1}
-              disabled={sending}
-              className={[
-                'flex-1 resize-none rounded-xl bg-[var(--surface-2)] border border-[var(--border)]',
-                'focus:border-[var(--accent)] outline-none px-4 py-2.5 text-sm text-[var(--text)]',
-                'placeholder:text-[var(--text-muted)] transition-colors leading-relaxed',
-                'disabled:opacity-50 min-h-[40px] max-h-[160px] overflow-y-auto',
-                '[field-sizing:content]',
-              ].join(' ')}
-            />
-            <button
-              onClick={handleSend}
-              disabled={!input.trim() || sending}
-              className={[
-                'p-2.5 rounded-xl transition-colors shrink-0',
-                input.trim() && !sending
-                  ? 'bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white'
-                  : 'bg-[var(--surface-2)] text-[var(--text-muted)] cursor-not-allowed',
-              ].join(' ')}
-            >
-              {sending ? <Loader2 size={18} className="animate-spin" /> : <Send size={18} />}
-            </button>
-          </div>
-          <div className="flex justify-center mt-1.5 max-w-3xl mx-auto relative" ref={pickerRef}>
-            <button
-              onClick={() => setModelPickerOpen((o) => !o)}
-              className="flex items-center gap-1 text-xs text-[var(--text-muted)] hover:text-[var(--text)] transition-colors px-2 py-0.5 rounded-md hover:bg-[var(--surface-2)]"
-            >
-              <span>{provider} · {model}</span>
-              <ChevronDown size={12} className={modelPickerOpen ? 'rotate-180' : ''} style={{ transition: 'transform 0.15s' }} />
-            </button>
+        <ChatInput
+          onSend={handleSend}
+          disabled={sending}
+          webSearch={webSearch}
+          onWebSearchToggle={() => setWebSearch((v) => !v)}
+        />
 
-            {modelPickerOpen && (
-              <div
-                onMouseDown={(e) => e.stopPropagation()}
-                className="absolute bottom-full mb-1 left-1/2 -translate-x-1/2 w-80 max-h-72 overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-xl z-50"
-              >
-                {providers.map((p) => (
-                  <div key={p.id}>
-                    <div className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-widest text-[var(--text-muted)] border-b border-[var(--border)]">
-                      {p.id}
-                    </div>
-                    {p.models.map((m) => (
-                      <button
-                        key={m.model}
-                        onClick={() => handleModelSelect(m.provider, m.model)}
-                        className={[
-                          'w-full text-left px-3 py-2 text-xs transition-colors truncate',
-                          m.provider === provider && m.model === model
-                            ? 'bg-[var(--accent)]/15 text-[var(--text)]'
-                            : 'text-[var(--text-muted)] hover:bg-[var(--surface-2)] hover:text-[var(--text)]',
-                        ].join(' ')}
-                      >
-                        {m.label}
-                      </button>
-                    ))}
+        <div className="flex justify-center py-1.5 bg-[var(--surface)] border-t border-[var(--border)] relative" ref={pickerRef}>
+          <button
+            onClick={() => setModelPickerOpen((o) => !o)}
+            className="flex items-center gap-1 text-xs text-[var(--text-muted)] hover:text-[var(--text)] transition-colors px-2 py-0.5 rounded-md hover:bg-[var(--surface-2)]"
+          >
+            <span>{provider} · {model}</span>
+            <ChevronDown size={12} className={modelPickerOpen ? 'rotate-180' : ''} style={{ transition: 'transform 0.15s' }} />
+          </button>
+
+          {modelPickerOpen && (
+            <div
+              onMouseDown={(e) => e.stopPropagation()}
+              className="absolute bottom-full mb-1 left-1/2 -translate-x-1/2 w-80 max-h-72 overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-xl z-50"
+            >
+              {providers.map((p) => (
+                <div key={p.id}>
+                  <div className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-widest text-[var(--text-muted)] border-b border-[var(--border)]">
+                    {p.id}
                   </div>
-                ))}
-              </div>
-            )}
-          </div>
+                  {p.models.map((m) => (
+                    <button
+                      key={m.model}
+                      onClick={() => handleModelSelect(m.provider, m.model)}
+                      className={[
+                        'w-full text-left px-3 py-2 text-xs transition-colors truncate',
+                        m.provider === provider && m.model === model
+                          ? 'bg-[var(--accent)]/15 text-[var(--text)]'
+                          : 'text-[var(--text-muted)] hover:bg-[var(--surface-2)] hover:text-[var(--text)]',
+                      ].join(' ')}
+                    >
+                      {m.label}
+                    </button>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>
