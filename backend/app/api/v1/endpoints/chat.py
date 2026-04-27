@@ -2,6 +2,7 @@ import uuid
 import logging
 import time
 import asyncio
+import json
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,8 +16,10 @@ from app.db.models import User, Conversation, Message, Project
 from app.services.llm.router import (
     chat, chat_with_tools, stream_with_usage,
     ChatMessage, Provider, ToolCall,
+    XaiOptions, XaiSearchOptions,
 )
 from app.services.rag.memory import index_message, maybe_summarize, retrieve_memory
+from app.services.llm.router_classifier import classify_query, ClassifierDecision
 from app.services.usage.logger import log_chat_usage, log_search_usage
 from app.services.tools.search import (
     search_web, format_search_results,
@@ -101,7 +104,26 @@ class ChatRequest(BaseModel):
     provider: Provider = DEFAULT_PROVIDER
     stream: bool = True
     web_search: bool = True
+    # Web search backend pro non-xAI providery: "tavily" (default) nebo "grok".
+    # Když "grok", search_web tool dostane nadále stejné definice, jen se interně
+    # zavolá Grok Live Search místo Tavily.
+    web_search_backend: Literal["tavily", "grok"] = "tavily"
+    # Grok Live Search (search_parameters podle docs.x.ai) — jen pro xAI provider
+    grok_search: bool = False
+    grok_search_mode: Literal["off", "on", "auto"] = "auto"
+    grok_search_max_results: int = 15
+    grok_search_sources: list[str] | None = None       # ["web", "x", "news", "rss"]
+    grok_search_from_date: str | None = None           # ISO YYYY-MM-DD
+    grok_search_to_date: str | None = None
+    grok_allowed_domains: list[str] | None = None
+    grok_excluded_domains: list[str] | None = None
+    # Reasoning effort pro Grok reasoning modely (kromě grok-4)
+    grok_reasoning_effort: Literal["low", "high"] | None = None
     project_id: uuid.UUID | None = None  # pro nové konverzace bez conversation_id
+
+    # Routing mode — "manual" (výchozí, uživatel ovládá toggly) nebo "auto"
+    # (klasifikátor rozhodne kam pro kontext: web / history / email).
+    routing_mode: Literal["manual", "auto"] = "manual"
 
 
 class MessageOut(BaseModel):
@@ -109,6 +131,7 @@ class MessageOut(BaseModel):
     role: str
     content: str
     model: str | None
+    tool_data: dict | None = None
 
     model_config = {"from_attributes": True}
 
@@ -122,6 +145,33 @@ async def _bg_index_and_summarize(message_id: uuid.UUID, conv_id: uuid.UUID) -> 
     async with AsyncSessionLocal() as db:
         await index_message(message_id, db)
         await maybe_summarize(conv_id, db)
+
+
+async def _empty_str() -> str:
+    """No-op coroutine pro asyncio.gather když jednu z větví přeskakujeme."""
+    return ""
+
+
+def _build_xai_options(body: "ChatRequest") -> XaiOptions:
+    """Sestaví XaiOptions z ChatRequest. Bezpečné volat i pro non-xAI providery
+    (jen se nepoužije)."""
+    sources: list[dict] | None = None
+    if body.grok_search_sources:
+        sources = [{"type": s} for s in body.grok_search_sources if s]
+    return XaiOptions(
+        search=XaiSearchOptions(
+            enabled=body.grok_search,
+            mode=body.grok_search_mode,
+            return_citations=True,
+            max_search_results=body.grok_search_max_results,
+            sources=sources,
+            from_date=body.grok_search_from_date,
+            to_date=body.grok_search_to_date,
+            allowed_domains=body.grok_allowed_domains,
+            excluded_domains=body.grok_excluded_domains,
+        ),
+        reasoning_effort=body.grok_reasoning_effort,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -190,25 +240,51 @@ def _db_messages_to_llm(history: list[Message], provider: str) -> list[ChatMessa
                 ))
 
         elif msg.role == "tool":
-            # Výsledek tool callu
+            # Výsledek tool callu.
+            # Anthropic vyžaduje, aby VŠECHNY tool_result bloky pro jedno tool_use
+            # kolo byly agregovány v JEDNOM user message (pole content blocks).
+            # Pokud by každý tool_result byl v samostatné zprávě, API vrátí 400
+            # "tool_use ids were found without tool_result blocks immediately after".
             td = msg.tool_data or {}
             tool_call_id = td.get("tool_call_id", "")
             tool_name = td.get("tool_name", "")
             content = msg.content or ""
 
             if is_anthropic:
-                raw = {
-                    "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": tool_call_id,
-                        "content": content,
-                    }],
-                }
-                result.append(ChatMessage(
-                    role="user", content="",
-                    _raw_anthropic=raw,
-                ))
+                # Pokud je předchozí ChatMessage také tool_result (user/_raw_anthropic
+                # s content[0].type == "tool_result"), připoj nový blok do toho
+                # samého user messagu.
+                appended = False
+                if result:
+                    prev = result[-1]
+                    prev_raw = getattr(prev, "_raw_anthropic", None)
+                    if (
+                        isinstance(prev_raw, dict)
+                        and prev_raw.get("role") == "user"
+                        and isinstance(prev_raw.get("content"), list)
+                        and prev_raw["content"]
+                        and prev_raw["content"][0].get("type") == "tool_result"
+                    ):
+                        prev_raw["content"].append({
+                            "type": "tool_result",
+                            "tool_use_id": tool_call_id,
+                            "content": content,
+                        })
+                        appended = True
+
+                if not appended:
+                    raw = {
+                        "role": "user",
+                        "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": tool_call_id,
+                            "content": content,
+                        }],
+                    }
+                    result.append(ChatMessage(
+                        role="user", content="",
+                        _raw_anthropic=raw,
+                    ))
             else:
                 raw = {
                     "role": "tool",
@@ -323,25 +399,98 @@ async def send_message(
     # Indexace user zprávy na pozadí
     asyncio.create_task(_bg_index_and_summarize(user_msg.id, conv.id))
 
-    # Načti paměť z minulých konverzací + emailovou historii (paralelně)
-    memory, email_memory = await asyncio.gather(
-        retrieve_memory(
-            query=body.message,
-            user_id=current_user.id,
-            current_conv_id=conv.id,
-            db=db,
-        ),
-        retrieve_email_memory(query=body.message),
-    )
+    # --- Routing classifier (auto mode) -----------------------------------
+    # V "auto" módu před hlavním LLM voláním zavoláme rychlý klasifikátor,
+    # který rozhodne kam pro kontext (web/history/email). V "manual" módu
+    # si vše určuje uživatel přes toggly v UI (zachovává starou logiku).
+    routing_decision: ClassifierDecision | None = None
+    if body.routing_mode == "auto":
+        # Vezmi posledních ~3 zpráv konverzace (kromě právě přidané) jako kontext.
+        ctx_q = await db.execute(
+            select(Message)
+            .where(Message.conversation_id == conv.id, Message.id != user_msg.id)
+            .order_by(Message.created_at.desc())
+            .limit(3)
+        )
+        recent_msgs = list(reversed(ctx_q.scalars().all()))
+        recent_chat_msgs = [
+            ChatMessage(role=m.role, content=m.content or "")  # type: ignore[arg-type]
+            for m in recent_msgs
+            if m.role in ("user", "assistant")
+        ]
+        routing_decision = await classify_query(body.message, recent_chat_msgs)
 
-    # Sestavíme historii zpráv pro LLM
+        # Aplikuj rozhodnutí na request flagy:
+        # - web → zapni web_search (Tavily nebo Grok Live Search)
+        if routing_decision.web:
+            body.web_search = True
+            if body.provider == "xai":
+                body.grok_search = True
+        else:
+            body.web_search = False
+            if body.provider == "xai":
+                body.grok_search = False
+
+    # Načti paměť z minulých konverzací + emailovou historii (paralelně).
+    # V auto módu respektuj rozhodnutí klasifikátoru, v manual vždy obojí
+    # (původní chování — memory je levná a obvykle užitečná).
+    want_history = True if routing_decision is None else routing_decision.history
+    want_email = True if routing_decision is None else routing_decision.email
+
+    memory_task = (
+        retrieve_memory(query=body.message, user_id=current_user.id, current_conv_id=conv.id, db=db)
+        if want_history else _empty_str()
+    )
+    email_task = (
+        retrieve_email_memory(query=body.message)
+        if want_email else _empty_str()
+    )
+    memory, email_memory = await asyncio.gather(memory_task, email_task)
+
+    # Sestavíme historii zpráv pro LLM.
+    # POZOR: tool_call + tool messages MUSÍ být v historii kompletní
+    # (Anthropic vyžaduje, aby každý tool_use měl odpovídající tool_result).
+    # Vezmeme posledních N zpráv (chronologicky) místo prvních N, aby se
+    # nikdy neořízla nedávná konverzace; navíc po načtení dotrhneme případné
+    # nedokončené tool kolo (orphan tool_call bez všech tool_result, nebo
+    # naopak chybějící tool_call před tool messages).
+    HISTORY_LIMIT = 80
     history_result = await db.execute(
         select(Message)
         .where(Message.conversation_id == conv.id)
-        .order_by(Message.created_at)
-        .limit(60)   # víc zpráv — tool_call + tool zabírají extra řádky
+        .order_by(Message.created_at.desc())
+        .limit(HISTORY_LIMIT)
     )
-    history = history_result.scalars().all()
+    history = list(reversed(history_result.scalars().all()))
+
+    # Doplň chybějící tool kolo na začátku (pokud první zpráva je tool nebo
+    # první tool_call má některý tool_result mimo okno) — odřízni neúplný
+    # úvod, ne dorovnávej dotazem (jednodušší a bezpečnější):
+    #   skip leading messages until we find one that is not 'tool' (orphan
+    #   tool_result without preceding tool_call → Anthropic 400).
+    while history and history[0].role == "tool":
+        history.pop(0)
+    # Pokud první zpráva je tool_call ale nemáme všechny její tool_result
+    # bezprostředně za ní, ořízni celé to kolo:
+    if history and history[0].role == "tool_call":
+        td0 = history[0].tool_data or {}
+        expected_ids = {t.get("id") for t in (td0.get("tool_calls") or []) if t.get("id")}
+        # spočítej tool_result IDs hned po něm
+        seen_ids: set[str] = set()
+        i = 1
+        while i < len(history) and history[i].role == "tool":
+            seen_ids.add((history[i].tool_data or {}).get("tool_call_id"))
+            i += 1
+        if not expected_ids.issubset(seen_ids):
+            # Ořízni neúplné kolo
+            history = history[i:]
+
+    # Doplň konec: pokud poslední zpráva je tool_call nebo tool (neúplné
+    # kolo na konci historie — typicky když LIMIT ořízne uprostřed tool kola
+    # protože jsme volili posledních N zpráv), odřízni i to celé kolo z konce.
+    # Najdi pozici posledního "běžného" assistant/user textu a ořízni za něj.
+    while history and history[-1].role in ("tool_call", "tool"):
+        history.pop()
 
     # System prompt + instrukce projektu + volitelná paměť z minulých konverzací
     system_content = SYSTEM_PROMPT
@@ -371,10 +520,11 @@ async def send_message(
 
     # Streaming odpověď
     if body.stream:
-        log.info("STREAM  user=%s conv=%s provider=%s model=%s memory=%s web_search=%s",
-                 current_user.id, conv.id, body.provider, body.model, bool(memory), body.web_search)
+        log.info("STREAM  user=%s conv=%s provider=%s model=%s memory=%s web_search=%s routing=%s",
+                 current_user.id, conv.id, body.provider, body.model, bool(memory), body.web_search,
+                 f"auto({routing_decision.reasoning[:60]})" if routing_decision else "manual")
         return StreamingResponse(
-            _stream_and_save(llm_messages, body, conv.id, current_user.id, db),
+            _stream_and_save(llm_messages, body, conv.id, current_user.id, db, routing_decision=routing_decision),
             media_type="text/event-stream",
             headers={
                 "X-Conversation-Id": str(conv.id),
@@ -391,6 +541,7 @@ async def send_message(
         messages=enriched,
         model=body.model,
         provider=body.provider,
+        xai=_build_xai_options(body),
     )
     assistant_msg = Message(
         conversation_id=conv.id,
@@ -428,6 +579,7 @@ async def _get_all_tools(
     web_search_enabled: bool,
     user_id: uuid.UUID | None = None,
     db: AsyncSession | None = None,
+    web_search_backend: Literal["tavily", "grok"] = "tavily",
 ) -> list[dict]:
     """Sestaví seznam všech dostupných tools pro daného providera."""
     tools: list[dict] = []
@@ -436,9 +588,15 @@ async def _get_all_tools(
     # File tools — vždy dostupné (workspace je vždy namountován)
     tools.extend(FILE_TOOLS_ANTHROPIC if is_anthropic else FILE_TOOLS_OPENAI)
 
-    # Web search — jen pokud je Tavily API klíč nastaven a uživatel to chce
-    if web_search_enabled and settings.tavily_api_key:
-        tools.append(SEARCH_TOOL_ANTHROPIC if is_anthropic else SEARCH_TOOL_OPENAI)
+    # Web search tool je dostupný non-xAI providerům (xAI má vlastní search_parameters).
+    # Backend volby:
+    #   - "tavily": potřeba TAVILY_API_KEY
+    #   - "grok":   potřeba XAI_API_KEY (volá Grok Live Search z jiného providera)
+    if web_search_enabled and provider != "xai":
+        if web_search_backend == "grok" and settings.xai_api_key:
+            tools.append(SEARCH_TOOL_ANTHROPIC if is_anthropic else SEARCH_TOOL_OPENAI)
+        elif web_search_backend == "tavily" and settings.tavily_api_key:
+            tools.append(SEARCH_TOOL_ANTHROPIC if is_anthropic else SEARCH_TOOL_OPENAI)
 
     # Email search — jen pokud je EMAIL_DB_URL nastaven
     if settings.email_db_url:
@@ -456,11 +614,16 @@ async def _execute_tool_call(
     tc: ToolCall,
     user_id: uuid.UUID | None = None,
     db: AsyncSession | None = None,
+    web_search_backend: Literal["tavily", "grok"] = "tavily",
 ) -> tuple[str, SearchMeta | None]:
     """Spustí tool call a vrátí (výsledek jako string, search metadata nebo None)."""
     if tc.name == "search_web":
         query = tc.args.get("query", "")
-        results, meta = await search_web(query)
+        if web_search_backend == "grok":
+            from app.services.tools.search import grok_web_search
+            results, meta = await grok_web_search(query)
+        else:
+            results, meta = await search_web(query)
         return format_search_results(results), meta
     if tc.name == "search_emails":
         results, _meta = await search_emails(
@@ -489,7 +652,7 @@ async def _run_tool_loop_no_stream(
     db: AsyncSession | None = None,
 ) -> tuple[list[ChatMessage], list[str]]:
     """Agentic loop bez streamingu. Vrátí (finální_zprávy, seznam_SSE_eventů_pro_frontend)."""
-    tools = await _get_all_tools(body.provider, body.web_search, user_id=user_id, db=db)
+    tools = await _get_all_tools(body.provider, body.web_search, user_id=user_id, db=db, web_search_backend=body.web_search_backend)
     if not tools:
         return llm_messages, []
 
@@ -505,6 +668,7 @@ async def _run_tool_loop_no_stream(
                 tools=tools,
                 temperature=0,
                 max_tokens=4096,
+                xai=_build_xai_options(body),
             )
         except Exception as exc:
             log.warning("TOOL_LOOP_FAILED round=%d %s: %s", _round, type(exc).__name__, exc)
@@ -533,7 +697,10 @@ async def _run_tool_loop_no_stream(
                 event = f"[TOOL:{tc.name}:{tc.args.get('path', tc.args.get('query', ''))}]"
             sse_events.append(event)
 
-            tool_output, search_meta = await _execute_tool_call(tc, user_id=user_id, db=db)
+            tool_output, search_meta = await _execute_tool_call(
+                tc, user_id=user_id, db=db,
+                web_search_backend=body.web_search_backend,
+            )
             tool_results_text.append(f"[Tool: {tc.name}]\n{tool_output}")
             tool_outputs_for_db.append((tc.tool_call_id, tool_output))
 
@@ -663,6 +830,7 @@ async def _stream_and_save(
     conv_id: uuid.UUID,
     user_id: uuid.UUID,
     db: AsyncSession,
+    routing_decision: ClassifierDecision | None = None,
 ):
     """Generator pro SSE streaming + uložení + indexace na pozadí.
 
@@ -678,8 +846,20 @@ async def _stream_and_save(
     first_token = True
     final_usage = None
 
+    # SSE event s rozhodnutím routeru — UI to může zobrazit jako badge.
+    if routing_decision is not None:
+        payload = {
+            "web": routing_decision.web,
+            "history": routing_decision.history,
+            "email": routing_decision.email,
+            "reasoning": routing_decision.reasoning,
+            "took_ms": routing_decision.took_ms,
+            "fallback": routing_decision.fallback,
+        }
+        yield f"event: routing\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
     # --- Agentic tool loop ---
-    tools = await _get_all_tools(body.provider, body.web_search, user_id=user_id, db=db)
+    tools = await _get_all_tools(body.provider, body.web_search, user_id=user_id, db=db, web_search_backend=body.web_search_backend)
     messages_to_use = list(llm_messages)
 
     if tools:
@@ -692,6 +872,7 @@ async def _stream_and_save(
                     tools=tools,
                     temperature=0,
                     max_tokens=4096,
+                    xai=_build_xai_options(body),
                 )
             except Exception as exc:
                 log.warning("TOOL_LOOP_FAILED round=%d %s: %s", _round, type(exc).__name__, exc)
@@ -723,7 +904,10 @@ async def _stream_and_save(
                     path_or_q = tc.args.get("path", tc.args.get("query", ""))
                     yield f"data: [TOOL:{tc.name}:{path_or_q}]\n\n"
 
-                tool_output, search_meta = await _execute_tool_call(tc, user_id=user_id, db=db)
+                tool_output, search_meta = await _execute_tool_call(
+                    tc, user_id=user_id, db=db,
+                    web_search_backend=body.web_search_backend,
+                )
                 tool_results_text.append(f"[Tool: {tc.name}]\n{tool_output}")
                 tool_outputs_for_db.append((tc.tool_call_id, tool_output))
 
@@ -751,9 +935,19 @@ async def _stream_and_save(
             messages=messages_to_use,
             model=body.model,
             provider=body.provider,
+            xai=_build_xai_options(body),
         ):
             if usage_info is not None:
                 final_usage = usage_info
+                # Pokud Live Search vrátil citations, pošli je klientovi jako
+                # samostatný SSE event před [DONE].
+                if usage_info.citations:
+                    import json as _json
+                    payload = _json.dumps({
+                        "citations": usage_info.citations,
+                        "num_sources_used": usage_info.num_sources_used,
+                    }, ensure_ascii=False)
+                    yield f"event: citations\ndata: {payload}\n\n"
                 continue
             if first_token:
                 log.info("FIRST_TOKEN  provider=%s model=%s ttft=%.2fs",
@@ -771,11 +965,21 @@ async def _stream_and_save(
         log.info("STREAM_DONE  provider=%s model=%s tokens~=%d elapsed=%.2fs",
                  body.provider, body.model, tokens, elapsed)
         if full_content:
+            # Citations + reasoning info ulož do tool_data, ať se zobrazí i po reloadu
+            md: dict | None = None
+            if final_usage is not None and (final_usage.citations or final_usage.reasoning_tokens):
+                md = {}
+                if final_usage.citations:
+                    md["citations"] = final_usage.citations
+                    md["num_sources_used"] = final_usage.num_sources_used
+                if final_usage.reasoning_tokens:
+                    md["reasoning_tokens"] = final_usage.reasoning_tokens
             assistant_msg = Message(
                 conversation_id=conv_id,
                 role="assistant",
                 content="".join(full_content),
                 model=body.model,
+                tool_data=md,
             )
             db.add(assistant_msg)
             await db.commit()

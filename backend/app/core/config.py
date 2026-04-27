@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     together_api_key: str = ""
     openai_api_key: str = ""
     anthropic_api_key: str = ""
+    xai_api_key: str = ""
     ollama_base_url: str = "http://host.docker.internal:11434"
 
     # Web search
@@ -32,6 +33,16 @@ class Settings(BaseSettings):
     # Sumarizace konverzací
     summarization_provider: str = "together"
     summarization_model: str = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+
+    # Routing classifier — rychlé rozhodnutí kam pro kontext (web/history/email)
+    classifier_provider: str = "together"
+    classifier_model: str = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
+    classifier_max_tokens: int = 200
+    classifier_timeout_s: float = 8.0
+
+    # Grok jako web search backend (alternativa k Tavily, dostupné i pro non-xAI providery)
+    grok_search_model: str = "grok-4-fast-non-reasoning"
+    grok_search_max_tokens: int = 1024
 
     # Agent workspace
     agent_workspace: str = "/workspace"

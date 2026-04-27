@@ -6,9 +6,11 @@ interface ChatInputProps {
   disabled: boolean
   webSearch: boolean
   onWebSearchToggle: () => void
+  /** Když true, manuální Web Search toggle je přepsán Auto módem (jen vizuální ztlumení). */
+  overridden?: boolean
 }
 
-export function ChatInput({ onSend, disabled, webSearch, onWebSearchToggle }: ChatInputProps) {
+export function ChatInput({ onSend, disabled, webSearch, onWebSearchToggle, overridden }: ChatInputProps) {
   const [input, setInput] = useState('')
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -30,10 +32,18 @@ export function ChatInput({ onSend, disabled, webSearch, onWebSearchToggle }: Ch
       <div className="flex items-end gap-2 max-w-3xl mx-auto">
         <button
           onClick={onWebSearchToggle}
-          title={webSearch ? 'Web search zapnut — klikni pro vypnutí' : 'Web search vypnut — klikni pro zapnutí'}
+          title={
+            overridden
+              ? 'Auto mód je zapnutý — o web search rozhoduje klasifikátor'
+              : webSearch
+              ? 'Web search zapnut — klikni pro vypnutí'
+              : 'Web search vypnut — klikni pro zapnutí'
+          }
           className={[
             'p-2.5 rounded-xl transition-colors shrink-0',
-            webSearch
+            overridden
+              ? 'text-[var(--text-muted)]/40 hover:bg-[var(--surface-2)]'
+              : webSearch
               ? 'text-[var(--accent)] hover:bg-[var(--surface-2)]'
               : 'text-[var(--text-muted)] hover:bg-[var(--surface-2)]',
           ].join(' ')}

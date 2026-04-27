@@ -19,6 +19,10 @@ export interface ModelPreset {
   provider: string
   model: string
   label: string
+  slow?: boolean
+  tier?: 'basic' | 'advanced'
+  supports_search?: boolean
+  supports_reasoning_effort?: boolean
 }
 
 export interface ProviderInfo {

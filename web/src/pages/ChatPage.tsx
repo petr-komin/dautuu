@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { useSearchParams, useNavigate, useOutletContext } from 'react-router-dom'
-import { MessageSquare, Loader2, ChevronDown, Globe, FileText, FolderOpen, FilePlus, Trash2, X } from 'lucide-react'
+import { MessageSquare, Loader2, ChevronDown, Globe, FileText, FolderOpen, FilePlus, Trash2, X, Search, ExternalLink, Sliders, Sparkles, Mail, Brain } from 'lucide-react'
 import toast from 'react-hot-toast'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -11,6 +11,7 @@ import {
   sendMessageStream,
   type MessageOut,
   type ToolEvent,
+  type RoutingEvent,
 } from '../api/chat'
 import { listProjects } from '../api/projects'
 import { ChatInput } from '../components/chat/ChatInput'
@@ -53,6 +54,9 @@ interface UiMessage {
   model?: string | null
   streaming?: boolean
   activeToolEvent?: ToolEvent | null
+  citations?: string[]
+  numSourcesUsed?: number
+  routing?: RoutingEvent
 }
 
 export function ChatPage() {
@@ -73,6 +77,18 @@ export function ChatPage() {
   const [webSearch, setWebSearch] = useState<boolean>(() => {
     const stored = localStorage.getItem(WEB_SEARCH_STORAGE_KEY)
     return stored === null ? true : stored === 'true'
+  })
+  const [grokSearch, setGrokSearch] = useState(false)
+  const [grokReasoningEffort, setGrokReasoningEffort] = useState<'low' | 'high' | null>('low')
+  const [showAdvancedModels, setShowAdvancedModels] = useState(false)
+  const [autoMode, setAutoMode] = useState<boolean>(() => {
+    const stored = localStorage.getItem('dautuu:autoMode')
+    // Default = ZAPNUTO. Vypnout musí uživatel explicitně.
+    return stored === null ? true : stored === '1'
+  })
+  const [webSearchBackend, setWebSearchBackend] = useState<'tavily' | 'grok'>(() => {
+    const stored = localStorage.getItem('dautuu:webSearchBackend')
+    return stored === 'grok' ? 'grok' : 'tavily'
   })
 
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -126,6 +142,14 @@ export function ChatPage() {
   }, [webSearch])
 
   useEffect(() => {
+    localStorage.setItem('dautuu:autoMode', autoMode ? '1' : '0')
+  }, [autoMode])
+
+  useEffect(() => {
+    localStorage.setItem('dautuu:webSearchBackend', webSearchBackend)
+  }, [webSearchBackend])
+
+  useEffect(() => {
     function handleClick(e: MouseEvent) {
       if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
         setModelPickerOpen(false)
@@ -157,11 +181,29 @@ export function ChatPage() {
         provider,
         model,
         webSearch,
+        webSearchBackend,
+        grokSearch: { enabled: grokSearch, mode: 'auto' },
+        grokReasoningEffort: provider === 'xai' ? grokReasoningEffort : null,
+        routingMode: autoMode ? 'auto' : 'manual',
         projectId: projectId,
         onToolEvent: (event) => {
           setMessages((prev) =>
             prev.map((m) =>
               m.id === tempBotId ? { ...m, activeToolEvent: event } : m
+            )
+          )
+        },
+        onRouting: (ev) => {
+          setMessages((prev) =>
+            prev.map((m) => (m.id === tempBotId ? { ...m, routing: ev } : m))
+          )
+        },
+        onCitations: (ev) => {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === tempBotId
+                ? { ...m, citations: ev.citations, numSourcesUsed: ev.num_sources_used }
+                : m
             )
           )
         },
@@ -187,6 +229,8 @@ export function ChatPage() {
                     model: m.model,
                     streaming: false,
                     activeToolEvent: null,
+                    citations: m.tool_data?.citations,
+                    numSourcesUsed: m.tool_data?.num_sources_used,
                   }))
                 )
               )
@@ -220,6 +264,10 @@ export function ChatPage() {
     setProvider(providerName)
     setModel(modelName)
     setModelPickerOpen(false)
+    // Reset Grok Search při přepnutí na jiného providera
+    if (providerName !== 'xai') {
+      setGrokSearch(false)
+    }
     try {
       await savePreference(providerName, modelName)
     } catch {
@@ -242,6 +290,33 @@ export function ChatPage() {
             key={msg.id}
             className={['flex flex-col', msg.role === 'user' ? 'items-end' : 'items-start'].join(' ')}
           >
+            {msg.role === 'assistant' && msg.routing && (
+              <div
+                className="flex items-center gap-1.5 text-[10px] text-[var(--text-muted)] mb-1 px-1"
+                title={msg.routing.reasoning + (msg.routing.fallback ? ' (fallback)' : ` · ${msg.routing.took_ms}ms`)}
+              >
+                <Sparkles size={10} className="text-[var(--accent)]/70" />
+                <span>Auto:</span>
+                {msg.routing.web && (
+                  <span className="flex items-center gap-0.5 px-1 rounded bg-[var(--accent)]/10 text-[var(--accent)]">
+                    <Globe size={9} /> web
+                  </span>
+                )}
+                {msg.routing.history && (
+                  <span className="flex items-center gap-0.5 px-1 rounded bg-[var(--surface-2)]">
+                    <Brain size={9} /> history
+                  </span>
+                )}
+                {msg.routing.email && (
+                  <span className="flex items-center gap-0.5 px-1 rounded bg-[var(--surface-2)]">
+                    <Mail size={9} /> email
+                  </span>
+                )}
+                {!msg.routing.web && !msg.routing.history && !msg.routing.email && (
+                  <span className="opacity-60">jen znalosti modelu</span>
+                )}
+              </div>
+            )}
             {msg.role === 'assistant' && msg.activeToolEvent && (
               <div className="flex items-center gap-1.5 text-xs text-[var(--text-muted)] mb-1.5 px-1 animate-pulse">
                 {toolEventIcon(msg.activeToolEvent)}
@@ -272,6 +347,34 @@ export function ChatPage() {
                 </>
               )}
             </div>
+            {msg.role === 'assistant' && msg.citations && msg.citations.length > 0 && (
+              <div className="max-w-[75%] mt-1.5 flex flex-col gap-1 px-1">
+                <div className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-[var(--text-muted)] font-semibold">
+                  <Globe size={10} />
+                  <span>Zdroje{msg.numSourcesUsed ? ` (${msg.numSourcesUsed})` : ''}</span>
+                </div>
+                <div className="flex flex-col gap-0.5">
+                  {msg.citations.map((url, idx) => {
+                    let host = url
+                    try { host = new URL(url).hostname.replace(/^www\./, '') } catch { /* keep raw */ }
+                    return (
+                      <a
+                        key={`${msg.id}-cit-${idx}`}
+                        href={url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="flex items-center gap-1.5 text-xs text-[var(--text-muted)] hover:text-[var(--accent)] transition-colors truncate"
+                        title={url}
+                      >
+                        <span className="text-[10px] text-[var(--text-muted)]/60 w-4 shrink-0 text-right">{idx + 1}.</span>
+                        <ExternalLink size={10} className="shrink-0" />
+                        <span className="truncate">{host}</span>
+                      </a>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
             {msg.role === 'assistant' && msg.model && (
               <span className="text-[10px] text-[var(--text-muted)] mt-0.5 px-1">
                 {providers.flatMap(p => p.models).find(m => m.model === msg.model)?.label ?? msg.model.split('/').pop()}
@@ -287,6 +390,7 @@ export function ChatPage() {
         disabled={sending}
         webSearch={webSearch}
         onWebSearchToggle={() => setWebSearch((v) => !v)}
+        overridden={autoMode}
       />
 
       {/* Indikátor kontextu nové konverzace */}
@@ -314,7 +418,7 @@ export function ChatPage() {
       )}
 
       {/* Model picker */}
-      <div className="flex justify-center py-1.5 bg-[var(--surface)] border-t border-[var(--border)] relative" ref={pickerRef}>
+      <div className="flex justify-center items-center gap-2 py-1.5 bg-[var(--surface)] border-t border-[var(--border)] relative" ref={pickerRef}>
         <button
           onClick={() => setModelPickerOpen((o) => !o)}
           className="flex items-center gap-1 text-xs text-[var(--text-muted)] hover:text-[var(--text)] transition-colors px-2 py-0.5 rounded-md hover:bg-[var(--surface-2)]"
@@ -323,32 +427,117 @@ export function ChatPage() {
           <ChevronDown size={12} className={modelPickerOpen ? 'rotate-180' : ''} style={{ transition: 'transform 0.15s' }} />
         </button>
 
+        {/* Auto routing toggle — klasifikátor rozhodne kam pro kontext */}
+        <button
+          onClick={() => setAutoMode((v) => !v)}
+          title="Auto: rychlý LLM rozhodne jestli hledat na webu / v historii / v emailech"
+          className={[
+            'flex items-center gap-1 text-xs px-2 py-0.5 rounded-md transition-colors',
+            autoMode
+              ? 'bg-[var(--accent)]/20 text-[var(--accent)] border border-[var(--accent)]/30'
+              : 'text-[var(--text-muted)] hover:bg-[var(--surface-2)] hover:text-[var(--text)]',
+          ].join(' ')}
+        >
+          <Sparkles size={12} />
+          <span>Auto</span>
+        </button>
+
+        {/* Web search backend — Tavily vs Grok Live Search.
+            Skrýt pro xAI providera (ten používá své search_parameters). */}
+        {provider !== 'xai' && webSearch && (
+          <button
+            onClick={() => setWebSearchBackend((b) => (b === 'tavily' ? 'grok' : 'tavily'))}
+            title={
+              webSearchBackend === 'grok'
+                ? 'Web search: Grok Live Search (xAI). Klikni pro Tavily.'
+                : 'Web search: Tavily. Klikni pro Grok Live Search.'
+            }
+            className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-md transition-colors text-[var(--text-muted)] hover:bg-[var(--surface-2)] hover:text-[var(--text)] border border-[var(--border)]"
+          >
+            <Search size={12} />
+            <span>{webSearchBackend === 'grok' ? 'Grok' : 'Tavily'}</span>
+          </button>
+        )}
+
+        {/* Grok Live Search toggle — viditelný jen pro xAI provider */}
+        {provider === 'xai' && !autoMode && (
+          <button
+            onClick={() => setGrokSearch((g) => !g)}
+            title="Grok Live Search (web + X/Twitter)"
+            className={[
+              'flex items-center gap-1 text-xs px-2 py-0.5 rounded-md transition-colors',
+              grokSearch
+                ? 'bg-[var(--accent)]/20 text-[var(--accent)] border border-[var(--accent)]/30'
+                : 'text-[var(--text-muted)] hover:bg-[var(--surface-2)] hover:text-[var(--text)]',
+            ].join(' ')}
+          >
+            <Search size={12} />
+            <span>Search</span>
+          </button>
+        )}
+
+        {/* Reasoning effort selector — jen pro xAI modely co to podporují */}
+        {provider === 'xai' && providers.flatMap(p => p.models).find(m => m.model === model)?.supports_reasoning_effort && (
+          <div className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-md text-[var(--text-muted)] bg-[var(--surface-2)]/60">
+            <Sliders size={12} />
+            <span>Effort:</span>
+            {(['low', 'high'] as const).map((lvl) => (
+              <button
+                key={lvl}
+                onClick={() => setGrokReasoningEffort(lvl)}
+                className={[
+                  'px-1.5 rounded transition-colors',
+                  grokReasoningEffort === lvl
+                    ? 'bg-[var(--accent)]/20 text-[var(--accent)]'
+                    : 'hover:text-[var(--text)]',
+                ].join(' ')}
+              >
+                {lvl}
+              </button>
+            ))}
+          </div>
+        )}
+
         {modelPickerOpen && (
           <div
             onMouseDown={(e) => e.stopPropagation()}
             className="absolute bottom-full mb-1 left-1/2 -translate-x-1/2 w-80 max-h-72 overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--surface)] shadow-xl z-50"
           >
-            {providers.map((p) => (
-              <div key={p.id}>
-                <div className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-widest text-[var(--text-muted)] border-b border-[var(--border)]">
-                  {p.id}
+            {providers.map((p) => {
+              const visibleModels = p.models.filter(m => showAdvancedModels || (m.tier ?? 'basic') === 'basic')
+              if (visibleModels.length === 0 && !showAdvancedModels) return null
+              return (
+                <div key={p.id}>
+                  <div className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-widest text-[var(--text-muted)] border-b border-[var(--border)]">
+                    {p.id}
+                  </div>
+                  {visibleModels.map((m) => (
+                    <button
+                      key={m.model}
+                      onClick={() => handleModelSelect(m.provider, m.model)}
+                      className={[
+                        'w-full text-left px-3 py-2 text-xs transition-colors truncate flex items-center justify-between gap-2',
+                        m.provider === provider && m.model === model
+                          ? 'bg-[var(--accent)]/15 text-[var(--text)]'
+                          : 'text-[var(--text-muted)] hover:bg-[var(--surface-2)] hover:text-[var(--text)]',
+                      ].join(' ')}
+                    >
+                      <span className="truncate">{m.label}</span>
+                      <span className="flex items-center gap-1 shrink-0">
+                        {m.slow && <span className="text-[9px] text-amber-500/80" title="Reasoning model — pomalejší TTFT">slow</span>}
+                        {(m.tier ?? 'basic') === 'advanced' && <span className="text-[9px] text-[var(--text-muted)]/60">adv</span>}
+                      </span>
+                    </button>
+                  ))}
                 </div>
-                {p.models.map((m) => (
-                  <button
-                    key={m.model}
-                    onClick={() => handleModelSelect(m.provider, m.model)}
-                    className={[
-                      'w-full text-left px-3 py-2 text-xs transition-colors truncate',
-                      m.provider === provider && m.model === model
-                        ? 'bg-[var(--accent)]/15 text-[var(--text)]'
-                        : 'text-[var(--text-muted)] hover:bg-[var(--surface-2)] hover:text-[var(--text)]',
-                    ].join(' ')}
-                  >
-                    {m.label}
-                  </button>
-                ))}
-              </div>
-            ))}
+              )
+            })}
+            <button
+              onClick={() => setShowAdvancedModels((v) => !v)}
+              className="w-full text-left px-3 py-2 text-[10px] uppercase tracking-wider text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--surface-2)] border-t border-[var(--border)] transition-colors"
+            >
+              {showAdvancedModels ? '− Skrýt advanced modely' : '+ Zobrazit advanced modely'}
+            </button>
           </div>
         )}
       </div>

@@ -149,3 +149,122 @@ def format_search_results(results: list[SearchResult]) -> str:
         lines.append(f"    {r['content']}")
         lines.append("")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Grok web search backend — zavolá xAI Live Search a vrátí výsledky ve stejném
+# formátu jako Tavily, takže může sloužit jako drop-in náhrada pro non-xAI
+# providery (Sonnet, GPT, Llama …).
+# ---------------------------------------------------------------------------
+
+async def grok_web_search(
+    query: str,
+    max_results: int = 8,
+) -> tuple[list[SearchResult], SearchMeta]:
+    """Zavolá Grok přes Responses API + Agent Tools (web_search) a vrátí
+    výsledky + citations ve formátu Tavily.
+
+    Po dubnu 2026 xAI deprecated `search_parameters` (Live Search v Chat
+    Completions). Náhrada je `/v1/responses` endpoint s `tools=[{type:"web_search"}]`,
+    který provede agentic web search server-side a vrátí annotations s URL
+    citations. Voláme přes čistý httpx (OpenAI SDK 1.59 ještě nemá `responses`
+    namespace).
+
+    Args:
+        query: Vyhledávací dotaz.
+        max_results: Aproximativní limit citations (Responses API to nepřijímá
+            přímo — slouží jen k truncate výsledku).
+
+    Returns:
+        (list výsledků, meta). Při chybě vrátí ([], meta success=False).
+    """
+    meta: SearchMeta = {
+        "query": query,
+        "provider": "grok",
+        "search_depth": "agent_tools",
+        "num_results": 0,
+        "success": False,
+    }
+
+    if not settings.xai_api_key:
+        log.warning("XAI_API_KEY není nastaven — Grok web search přeskočen")
+        return [], meta
+
+    try:
+        import httpx
+
+        headers = {
+            "Authorization": f"Bearer {settings.xai_api_key}",
+            "Content-Type": "application/json",
+        }
+        prompt = (
+            f"Vyhledej na internetu aktuální informace k tomuto dotazu a stručně "
+            f"je shrň v 4-7 větách. Uveď konkrétní fakta, čísla a data, ne obecné "
+            f"fráze. Dotaz: {query}"
+        )
+        body = {
+            "model": settings.grok_search_model,
+            "input": prompt,
+            "tools": [{"type": "web_search"}],
+            "max_output_tokens": settings.grok_search_max_tokens,
+        }
+        log.info("GROK_SEARCH query=%r model=%s max=%d",
+                 query, settings.grok_search_model, max_results)
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                "https://api.x.ai/v1/responses",
+                headers=headers,
+                json=body,
+            )
+        if resp.status_code != 200:
+            log.error("GROK_SEARCH_HTTP_%d body=%s", resp.status_code, resp.text[:300])
+            return [], meta
+
+        data = resp.json()
+
+        # Vyparsuj output: text + annotations (url_citation)
+        summary = ""
+        annotations: list[dict] = []
+        for item in data.get("output", []) or []:
+            if item.get("type") != "message":
+                continue
+            for c in item.get("content", []) or []:
+                if c.get("type") == "output_text":
+                    summary += c.get("text", "")
+                    for ann in c.get("annotations", []) or []:
+                        if ann.get("type") == "url_citation" and ann.get("url"):
+                            annotations.append(ann)
+
+        # Sestav SearchResult-y. První result obsahuje LLM summary
+        # (model už ho ukotvil k citations); ostatní jen URL+host.
+        # Truncate na max_results.
+        results: list[SearchResult] = []
+        seen_urls: set[str] = set()
+        for i, ann in enumerate(annotations[:max_results]):
+            url = ann["url"]
+            if url in seen_urls:
+                continue
+            seen_urls.add(url)
+            try:
+                from urllib.parse import urlparse
+                host = urlparse(url).hostname or url
+            except Exception:
+                host = url
+            content = summary if not results else ""
+            results.append(SearchResult(title=host, url=url, content=content))
+
+        # Pokud Grok nevrátil žádné citace (jen sám odpověděl), vyrobíme jediný
+        # "virtuální" výsledek se summary.
+        if not results and summary:
+            results.append(SearchResult(title="Grok summary", url="", content=summary))
+
+        meta["num_results"] = len(results)
+        meta["success"] = bool(results)
+        log.info("GROK_SEARCH_DONE query=%r results=%d cits=%d",
+                 query, len(results), len(annotations))
+        return results, meta
+    except Exception as exc:
+        log.error("GROK_SEARCH_ERROR query=%r: %s: %s",
+                  query, type(exc).__name__, exc)
+        return [], meta
