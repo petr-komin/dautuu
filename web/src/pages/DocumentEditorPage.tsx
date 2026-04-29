@@ -254,7 +254,10 @@ export function DocumentEditorPage() {
               </button>
             </div>
           </div>
-          <div className={`flex-1 overflow-hidden transition-opacity ${generating ? 'opacity-60 pointer-events-none' : ''}`}>
+          <div
+            data-color-mode="light"
+            className={`flex-1 overflow-hidden transition-opacity ${generating ? 'opacity-60 pointer-events-none' : ''}`}
+          >
             <MDEditor
               value={content}
               onChange={(val) => setContent(val || '')}
@@ -264,7 +267,7 @@ export function DocumentEditorPage() {
               previewOptions={{
                 rehypePlugins: [[rehypeSanitize]],
               }}
-              style={{ borderRadius: 0, border: 'none', background: 'transparent', boxShadow: 'none' }}
+              style={{ borderRadius: 0, border: 'none', background: '#ffffff', boxShadow: 'none', color: '#111' }}
             />
           </div>
         </div>
