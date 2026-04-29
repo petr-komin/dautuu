@@ -5,6 +5,7 @@ from sqlalchemy import select
 from typing import AsyncGenerator
 import uuid
 import json
+from datetime import datetime
 
 from app.db.session import get_db
 from app.db.models import Document, User
@@ -32,8 +33,8 @@ class DocumentResponse(BaseModel):
     project_id: uuid.UUID | None
     source_text: str
     content: str
-    created_at: str
-    updated_at: str
+    created_at: datetime
+    updated_at: datetime
 
     class Config:
         from_attributes = True
