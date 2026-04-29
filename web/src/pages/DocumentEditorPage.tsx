@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ChevronLeft, Save, Undo2, LayoutTemplate, ChevronDown, PanelLeftOpen, PanelLeftClose } from 'lucide-react'
+import { ChevronLeft, Save, Undo2, LayoutTemplate, ChevronDown } from 'lucide-react'
 import toast from 'react-hot-toast'
 import MDEditor from '@uiw/react-md-editor'
 import rehypeSanitize from 'rehype-sanitize'
@@ -25,7 +25,7 @@ export function DocumentEditorPage() {
   // Historie pro Undo
   const [history, setHistory] = useState<string[]>([])
   
-  const [sourceOpen, setSourceOpen] = useState(false)
+  const [activeTab, setActiveTab] = useState<'source' | 'result'>('result')
 
   // Auto-save debounce timeout
   const saveTimeoutRef = useRef<number | null>(null)
@@ -225,76 +225,70 @@ export function DocumentEditorPage() {
       </div>
 
       {/* Hlavní obsah */}
-      <div className="flex-1 flex overflow-hidden p-4 gap-4 z-0">
-        {/* Východisko - collapsible panel */}
-        {sourceOpen && (
-          <div className="w-80 shrink-0 flex flex-col bg-[var(--surface)] border border-[var(--border)] rounded-xl overflow-hidden shadow-sm">
-            <div className="px-4 py-2 border-b border-[var(--border)] bg-[var(--surface-2)] flex items-center justify-between">
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
-                Východisko (Podklady)
-              </span>
-              <button
-                onClick={() => setSourceOpen(false)}
-                className="p-0.5 rounded hover:bg-[var(--surface)] text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
-                title="Skrýt podklady"
-              >
-                <PanelLeftClose size={14} />
-              </button>
-            </div>
-            <textarea
-              value={sourceText}
-              onChange={e => setSourceText(e.target.value)}
-              placeholder="Zde vložte zdrojová data, podklady, osnovu nebo požadavky pro výsledný článek..."
-              className="flex-1 p-4 bg-transparent outline-none resize-none text-sm leading-relaxed"
-            />
-          </div>
-        )}
-
-        {/* Výsledek */}
-        <div className="flex-1 flex flex-col bg-[var(--surface)] border border-[var(--border)] rounded-xl overflow-hidden shadow-sm relative">
-          <div className="px-4 py-2 border-b border-[var(--border)] bg-[var(--surface-2)] flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              {!sourceOpen && (
-                <button
-                  onClick={() => setSourceOpen(true)}
-                  className="flex items-center gap-1.5 text-[10px] uppercase font-semibold text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
-                  title="Zobrazit podklady"
-                >
-                  <PanelLeftOpen size={12} />
-                  Podklady
-                </button>
-              )}
-              <span className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
-                Výsledek
-              </span>
-            </div>
-            <div className="flex items-center gap-2">
+      <div className="flex-1 flex flex-col overflow-hidden z-0">
+        {/* Záložkový přepínač */}
+        <div className="flex items-center gap-1 px-4 pt-3 bg-[var(--surface-2)] border-b border-[var(--border)] shrink-0">
+          <button
+            onClick={() => setActiveTab('source')}
+            className={`px-4 py-2 text-xs font-semibold rounded-t-lg border border-b-0 transition-colors ${
+              activeTab === 'source'
+                ? 'bg-[var(--surface)] border-[var(--border)] text-[var(--text)]'
+                : 'border-transparent text-[var(--text-muted)] hover:text-[var(--text)]'
+            }`}
+          >
+            Východisko
+          </button>
+          <button
+            onClick={() => setActiveTab('result')}
+            className={`px-4 py-2 text-xs font-semibold rounded-t-lg border border-b-0 transition-colors ${
+              activeTab === 'result'
+                ? 'bg-[var(--surface)] border-[var(--border)] text-[var(--text)]'
+                : 'border-transparent text-[var(--text-muted)] hover:text-[var(--text)]'
+            }`}
+          >
+            Výsledek
+          </button>
+          {activeTab === 'result' && (
+            <div className="ml-auto pb-1">
               <button
                 onClick={handleUndo}
                 disabled={history.length === 0 || generating}
-                className="flex items-center gap-1.5 text-[10px] uppercase font-semibold text-[var(--text-muted)] hover:text-[var(--text)] disabled:opacity-50 disabled:hover:text-[var(--text-muted)] transition-colors"
+                className="flex items-center gap-1.5 text-[10px] uppercase font-semibold text-[var(--text-muted)] hover:text-[var(--text)] disabled:opacity-50 transition-colors"
               >
                 <Undo2 size={12} />
                 Zpět
               </button>
             </div>
-          </div>
-          <div
-            data-color-mode="light"
-            className={`flex-1 overflow-hidden transition-opacity ${generating ? 'opacity-60 pointer-events-none' : ''}`}
-          >
-            <MDEditor
-              value={content}
-              onChange={(val) => setContent(val || '')}
-              height="100%"
-              preview="live"
-              hideToolbar={false}
-              previewOptions={{
-                rehypePlugins: [[rehypeSanitize]],
-              }}
-              style={{ borderRadius: 0, border: 'none', background: '#ffffff', boxShadow: 'none', color: '#111' }}
+          )}
+        </div>
+
+        {/* Obsah záložky */}
+        <div className="flex-1 overflow-hidden bg-[var(--surface)]">
+          {activeTab === 'source' ? (
+            <textarea
+              value={sourceText}
+              onChange={e => setSourceText(e.target.value)}
+              placeholder="Zde vložte zdrojová data, podklady, osnovu nebo požadavky pro výsledný článek..."
+              className="w-full h-full p-4 bg-transparent outline-none resize-none text-sm leading-relaxed"
             />
-          </div>
+          ) : (
+            <div
+              data-color-mode="light"
+              className={`h-full transition-opacity ${generating ? 'opacity-60 pointer-events-none' : ''}`}
+            >
+              <MDEditor
+                value={content}
+                onChange={(val) => setContent(val || '')}
+                height="100%"
+                preview="live"
+                hideToolbar={false}
+                previewOptions={{
+                  rehypePlugins: [[rehypeSanitize]],
+                }}
+                style={{ borderRadius: 0, border: 'none', background: '#ffffff', boxShadow: 'none', color: '#111' }}
+              />
+            </div>
+          )}
         </div>
       </div>
 
