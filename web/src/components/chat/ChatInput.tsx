@@ -8,9 +8,10 @@ interface ChatInputProps {
   onWebSearchToggle: () => void
   /** Když true, manuální Web Search toggle je přepsán Auto módem (jen vizuální ztlumení). */
   overridden?: boolean
+  placeholder?: string
 }
 
-export function ChatInput({ onSend, disabled, webSearch, onWebSearchToggle, overridden }: ChatInputProps) {
+export function ChatInput({ onSend, disabled, webSearch, onWebSearchToggle, overridden, placeholder }: ChatInputProps) {
   const [input, setInput] = useState('')
 
   function handleKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -55,7 +56,7 @@ export function ChatInput({ onSend, disabled, webSearch, onWebSearchToggle, over
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Napiš zprávu… (Enter odešle, Shift+Enter nový řádek)"
+          placeholder={placeholder || "Napiš zprávu… (Enter odešle, Shift+Enter nový řádek)"}
           rows={1}
           disabled={disabled}
           className={[

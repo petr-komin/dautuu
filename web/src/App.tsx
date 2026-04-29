@@ -11,6 +11,8 @@ import { McpPage } from './pages/McpPage'
 import { McpClientsPage } from './pages/McpClientsPage'
 import { ConnectionPage } from './pages/ConnectionPage'
 import { ProjectsPage } from './pages/ProjectsPage'
+import { DocumentsPage } from './pages/DocumentsPage'
+import { DocumentEditorPage } from './pages/DocumentEditorPage'
 
 export default function App() {
   return (
@@ -30,6 +32,8 @@ export default function App() {
         <Route path="/login" element={<LoginPage />} />
         <Route element={<AppLayout />}>
           <Route path="/chat" element={<ChatPage />} />
+          <Route path="/documents" element={<DocumentsPage />} />
+          <Route path="/documents/:id" element={<DocumentEditorPage />} />
           <Route path="/usage" element={<UsagePage />} />
           <Route path="/settings" element={<SettingsLayout />}>
             <Route index element={<Navigate to="model" replace />} />

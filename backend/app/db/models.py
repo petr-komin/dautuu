@@ -69,6 +69,24 @@ class Conversation(Base):
     messages: Mapped[list["Message"]] = relationship(back_populates="conversation", order_by="Message.created_at")
 
 
+class Document(Base):
+    __tablename__ = "documents"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=True)
+    project_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("projects.id", ondelete="SET NULL"), index=True, nullable=True)
+    
+    title: Mapped[str] = mapped_column(String(255), default="Nový dokument")
+    source_text: Mapped[str] = mapped_column(Text, default="")
+    content: Mapped[str] = mapped_column(Text, default="")
+    
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    user = relationship("User", backref="documents")
+    project = relationship("Project", backref="documents")
+
+
 class Message(Base):
     __tablename__ = "messages"
 

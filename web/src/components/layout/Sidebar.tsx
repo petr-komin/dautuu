@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { NavLink, useNavigate } from 'react-router-dom'
-import { Settings, LogOut, Bot, BarChart2, ChevronRight, Plus, MoreHorizontal, FolderOpen, MessageSquare } from 'lucide-react'
+import { Settings, LogOut, Bot, BarChart2, ChevronRight, Plus, MoreHorizontal, FolderOpen, MessageSquare, FileText } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { listProjects, type ProjectOut } from '../../api/projects'
 import { listConversations, assignConversation, type ConversationOut } from '../../api/chat'
@@ -89,6 +89,24 @@ export function Sidebar({ activeConvId, onConversationSelect, onNewConversation,
 
       {/* Scrollovatelný obsah */}
       <div className="flex-1 overflow-y-auto py-2 flex flex-col gap-1">
+
+        {/* Hlavní navigace navíc (Dokumenty) */}
+        <div className="px-2 mb-2">
+          <NavLink
+            to="/documents"
+            className={({ isActive }) =>
+              [
+                'flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs transition-colors',
+                isActive
+                  ? 'bg-[var(--accent)]/15 text-[var(--accent)]'
+                  : 'text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--surface-2)]',
+              ].join(' ')
+            }
+          >
+            <FileText size={14} />
+            Dokumenty
+          </NavLink>
+        </div>
 
         {/* Projekty */}
         <div className="px-2">
