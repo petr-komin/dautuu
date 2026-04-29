@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ChevronLeft, Save, Undo2, LayoutTemplate, ChevronDown } from 'lucide-react'
+import { ChevronLeft, Save, Undo2, LayoutTemplate, ChevronDown, PanelLeftOpen, PanelLeftClose } from 'lucide-react'
 import toast from 'react-hot-toast'
 import MDEditor from '@uiw/react-md-editor'
 import rehypeSanitize from 'rehype-sanitize'
@@ -25,6 +25,8 @@ export function DocumentEditorPage() {
   // Historie pro Undo
   const [history, setHistory] = useState<string[]>([])
   
+  const [sourceOpen, setSourceOpen] = useState(false)
+
   // Auto-save debounce timeout
   const saveTimeoutRef = useRef<number | null>(null)
 
@@ -222,27 +224,50 @@ export function DocumentEditorPage() {
         </div>
       </div>
 
-      {/* Hlavní obsah - dva panely vedle sebe */}
+      {/* Hlavní obsah */}
       <div className="flex-1 flex overflow-hidden p-4 gap-4 z-0">
-        {/* Východisko */}
-        <div className="flex-1 flex flex-col bg-[var(--surface)] border border-[var(--border)] rounded-xl overflow-hidden shadow-sm">
-          <div className="px-4 py-2 border-b border-[var(--border)] bg-[var(--surface-2)] text-[11px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
-            Východisko (Podklady)
+        {/* Východisko - collapsible panel */}
+        {sourceOpen && (
+          <div className="w-80 shrink-0 flex flex-col bg-[var(--surface)] border border-[var(--border)] rounded-xl overflow-hidden shadow-sm">
+            <div className="px-4 py-2 border-b border-[var(--border)] bg-[var(--surface-2)] flex items-center justify-between">
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
+                Východisko (Podklady)
+              </span>
+              <button
+                onClick={() => setSourceOpen(false)}
+                className="p-0.5 rounded hover:bg-[var(--surface)] text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
+                title="Skrýt podklady"
+              >
+                <PanelLeftClose size={14} />
+              </button>
+            </div>
+            <textarea
+              value={sourceText}
+              onChange={e => setSourceText(e.target.value)}
+              placeholder="Zde vložte zdrojová data, podklady, osnovu nebo požadavky pro výsledný článek..."
+              className="flex-1 p-4 bg-transparent outline-none resize-none text-sm leading-relaxed"
+            />
           </div>
-          <textarea
-            value={sourceText}
-            onChange={e => setSourceText(e.target.value)}
-            placeholder="Zde vložte zdrojová data, podklady, osnovu nebo požadavky pro výsledný článek..."
-            className="flex-1 p-4 bg-transparent outline-none resize-none text-sm leading-relaxed"
-          />
-        </div>
+        )}
 
         {/* Výsledek */}
         <div className="flex-1 flex flex-col bg-[var(--surface)] border border-[var(--border)] rounded-xl overflow-hidden shadow-sm relative">
           <div className="px-4 py-2 border-b border-[var(--border)] bg-[var(--surface-2)] flex items-center justify-between">
-            <span className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
-              Výsledek
-            </span>
+            <div className="flex items-center gap-2">
+              {!sourceOpen && (
+                <button
+                  onClick={() => setSourceOpen(true)}
+                  className="flex items-center gap-1.5 text-[10px] uppercase font-semibold text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
+                  title="Zobrazit podklady"
+                >
+                  <PanelLeftOpen size={12} />
+                  Podklady
+                </button>
+              )}
+              <span className="text-[11px] font-semibold uppercase tracking-wider text-[var(--text-muted)]">
+                Výsledek
+              </span>
+            </div>
             <div className="flex items-center gap-2">
               <button
                 onClick={handleUndo}
