@@ -136,13 +136,14 @@ export function Sidebar({ activeConvId, onConversationSelect, onNewConversation,
                   />
                   <FolderOpen size={13} className="shrink-0 text-[var(--accent)]/70" />
                   <span className="flex-1 text-left truncate">{proj.name}</span>
-                  <button
+                  <span
                     onClick={(e) => { e.stopPropagation(); onNewConversation(proj.id) }}
                     title="Nová konverzace v projektu"
+                    role="button"
                     className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:bg-[var(--surface)] transition-opacity"
                   >
                     <Plus size={11} />
-                  </button>
+                  </span>
                 </button>
                 {isExpanded && (
                   <div className="ml-4 flex flex-col gap-0.5 mb-1">
