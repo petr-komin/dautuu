@@ -262,7 +262,7 @@ export function DocumentEditorPage() {
               value={content}
               onChange={(val) => setContent(val || '')}
               height="100%"
-              preview="edit"
+              preview="live"
               hideToolbar={false}
               previewOptions={{
                 rehypePlugins: [[rehypeSanitize]],
