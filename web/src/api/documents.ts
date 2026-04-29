@@ -1,4 +1,5 @@
 import { api } from './client'
+import { useAuthStore } from '../store/authStore'
 
 export interface DocumentOut {
   id: string
@@ -26,23 +27,23 @@ export interface DocumentUpdate {
 
 export const documentsApi = {
   list: async () => {
-    const { data } = await api.get<DocumentOut[]>('/api/v1/documents')
+    const { data } = await api.get<DocumentOut[]>('/documents')
     return data
   },
   get: async (id: string) => {
-    const { data } = await api.get<DocumentOut>(`/api/v1/documents/${id}`)
+    const { data } = await api.get<DocumentOut>(`/documents/${id}`)
     return data
   },
   create: async (payload: DocumentCreate) => {
-    const { data } = await api.post<DocumentOut>('/api/v1/documents', payload)
+    const { data } = await api.post<DocumentOut>('/documents', payload)
     return data
   },
   update: async (id: string, payload: DocumentUpdate) => {
-    const { data } = await api.put<DocumentOut>(`/api/v1/documents/${id}`, payload)
+    const { data } = await api.put<DocumentOut>(`/documents/${id}`, payload)
     return data
   },
   delete: async (id: string) => {
-    await api.delete(`/api/v1/documents/${id}`)
+    await api.delete(`/documents/${id}`)
   },
 }
 
@@ -59,7 +60,7 @@ export async function generateDocumentStream(
   onError: (msg: string) => void,
   onDone: () => void
 ) {
-  const token = localStorage.getItem('dautuu:token')
+  const token = useAuthStore.getState().token
   const res = await fetch(`/api/v1/documents/${docId}/generate`, {
     method: 'POST',
     headers: {
